@@ -6,6 +6,7 @@ const LP_CONTRACT     = "0xAb168a06623eDe1b6b590733952cca4d7123f1F5"; // ZLT LP 
 
 const CHAIN    = "0x38"; // BNB Smart Chain
 const BASE_URL = "https://deep-index.moralis.io/api/v2.2";
+const BNB_RPC  = "https://bsc-dataseed.binance.org/"; // public BNB Chain RPC
 
 // ── SCORING FORMULA ───────────────────────────────────────────────────────────
 // volumePoints = Math.floor(volume24h / 1e18 / 100) * 5  → 5 pts per 100 ZLT in last 24h
@@ -71,38 +72,94 @@ async function fetchZLTTransfers() {
   return all;
 }
 
-// ── FETCH: Total staked NFTs via totalSupply() on STAKED_CONTRACT ─────────────
+// ── FETCH: Total staked NFTs via direct BNB RPC ───────────────────────────────
+// Reads the public uint256 variable `totalStaked` on STAKED_CONTRACT.
+// Function selector: keccak256("totalStaked()") = 0x4f2bfe5b
 async function fetchTotalStaked() {
   try {
-    const data = await moralisFetch(
-      `/functions/runContractFunction?chain=${CHAIN}` +
-      `&address=${STAKED_CONTRACT}` +
-      `&function_name=totalSupply` +
-      `&abi=${encodeURIComponent(JSON.stringify([{
-        "inputs":  [],
-        "name":    "totalSupply",
-        "outputs": [{ "internalType": "uint256", "name": "", "type": "uint256" }],
-        "stateMutability": "view",
-        "type": "function"
-      }]))}`
-    );
-    return parseInt(data.result || "0", 10);
+    const res = await fetch(BNB_RPC, {
+      method:  "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id:      1,
+        method:  "eth_call",
+        params: [
+          { to: STAKED_CONTRACT, data: "0x4f2bfe5b" },
+          "latest"
+        ]
+      })
+    });
+    const json = await res.json();
+    if (json.error) throw new Error(json.error.message);
+    // Result is a 32-byte hex-encoded uint256
+    const hex = json.result;
+    if (!hex || hex === "0x") return 0;
+    return Number(BigInt(hex));
   } catch (e) {
-    console.warn("totalSupply call failed, using 0:", e.message);
+    console.warn("[fetchTotalStaked] RPC call failed:", e.message);
     return 0;
   }
 }
 
 // ── FETCH: ZLT balance of LP contract (ZLT locked in LP) ─────────────────────
+// Uses direct BNB RPC to read PancakeSwap pair reserves.
+// Steps:
+//   1. Call token0() (0x0dfe1681) on LP_CONTRACT → address of token0
+//   2. Call token1() (0xd21220a7) on LP_CONTRACT → address of token1
+//   3. Call getReserves() (0x0902f1ac) → (reserve0 uint112, reserve1 uint112, blockTimestamp uint32)
+//   4. Match ZLT_CONTRACT to token0 or token1 → return the correct reserve as a string
 async function fetchZLTInLP() {
   try {
-    const data = await moralisFetch(
-      `/erc20/${ZLT_CONTRACT}/balance?chain=${CHAIN}&address=${LP_CONTRACT}`
-    );
-    // Returns { balance: "rawWeiString" }
-    return data.balance || "0";
+    // Helper: single eth_call returning a raw hex result
+    async function rpcCall(to, data) {
+      const res = await fetch(BNB_RPC, {
+        method:  "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id:      1,
+          method:  "eth_call",
+          params:  [{ to, data }, "latest"]
+        })
+      });
+      const json = await res.json();
+      if (json.error) throw new Error(json.error.message);
+      return json.result;
+    }
+
+    // 1. Read token0 and token1 in parallel
+    const [hex0, hex1] = await Promise.all([
+      rpcCall(LP_CONTRACT, "0x0dfe1681"), // token0()
+      rpcCall(LP_CONTRACT, "0xd21220a7")  // token1()
+    ]);
+
+    // ABI-decode address: strip 0x + leading 24 zero-padded bytes → last 20 bytes
+    const token0 = ("0x" + hex0.slice(-40)).toLowerCase();
+    const token1 = ("0x" + hex1.slice(-40)).toLowerCase();
+    const zlt    = ZLT_CONTRACT.toLowerCase();
+
+    // 2. Read reserves
+    const hexReserves = await rpcCall(LP_CONTRACT, "0x0902f1ac"); // getReserves()
+
+    // getReserves() returns three packed values in 96 bytes (3 × 32-byte slots):
+    //   slot 0 (bytes 0–63):   reserve0  (uint112, right-padded to 32 bytes)
+    //   slot 1 (bytes 64–127): reserve1  (uint112, right-padded to 32 bytes)
+    //   slot 2 (bytes 128–191): blockTimestampLast (uint32)
+    const raw = hexReserves.slice(2); // strip 0x
+    const reserve0 = BigInt("0x" + raw.slice(0,   64));
+    const reserve1 = BigInt("0x" + raw.slice(64, 128));
+
+    // 3. Return the reserve that corresponds to ZLT
+    if (token0 === zlt) return reserve0.toString();
+    if (token1 === zlt) return reserve1.toString();
+
+    // ZLT not found in either slot — return "0" as fallback
+    console.warn("[fetchZLTInLP] ZLT not found in LP pair. token0:", token0, "token1:", token1);
+    return "0";
+
   } catch (e) {
-    console.warn("LP balance fetch failed:", e.message);
+    console.warn("[fetchZLTInLP] RPC call failed:", e.message);
     return "0";
   }
 }
