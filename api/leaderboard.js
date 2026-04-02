@@ -286,8 +286,8 @@ export default async function handler(req, res) {
     // totalWallets = unique wallets in leaderboard (covers transfer senders + OAT holders)
     const totalWallets = leaderboard.length;
 
-    // Cache for 60s on Vercel edge, serve stale for 30s while revalidating
-    res.setHeader("Cache-Control", "s-maxage=60, stale-while-revalidate=30");
+    // Cache for 4 hours on Vercel edge, serve stale for 1 hour while revalidating
+res.setHeader("Cache-Control", "s-maxage=14400, stale-while-revalidate=3600");
 
     return res.status(200).json({
       success:      true,
