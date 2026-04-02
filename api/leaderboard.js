@@ -72,14 +72,42 @@ async function fetchZLTTransfers() {
   return all;
 }
 
-// ── FETCH: Total staked NFTs via direct BNB RPC (storage slot method) ─────────
+// ── FETCH: Total staked NFTs via direct BNB RPC ───────────────────────────────
 // The staking contract has a public uint256 variable `totalStaked`.
-// Instead of using an ABI call (which can fail due to function selector mismatches),
-// we read the raw storage slot. Based on the contract's storage layout,
-// `totalStaked` is at slot 12 (decimal) = 0xc in hex.
+// We first call the getter function (selector 0x4f2bfe5b) which is the most reliable.
+// If that fails, we fall back to reading storage slot 12 (0xc).
+// A sanity check rejects any value > 1,000,000 (realistic max for staked NFTs).
 async function fetchTotalStaked() {
+  // Helper to convert hex to number safely
+  const hexToNumber = (hex) => {
+    if (!hex || hex === "0x") return 0;
+    const val = Number(BigInt(hex));
+    return val > 1_000_000 ? 0 : val; // sanity check
+  };
+
+  // Try method 1: call totalStaked() function
   try {
-    const slot = "0xc"; // storage slot 12 (decimal)
+    const res = await fetch(BNB_RPC, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "eth_call",
+        params: [{ to: STAKED_CONTRACT, data: "0x4f2bfe5b" }, "latest"]
+      })
+    });
+    const json = await res.json();
+    if (!json.error && json.result) {
+      const val = hexToNumber(json.result);
+      if (val > 0) return val;
+    }
+  } catch (e) {
+    console.warn("[fetchTotalStaked] Function call failed:", e.message);
+  }
+
+  // Fallback: read storage slot 12 (0xc)
+  try {
     const res = await fetch(BNB_RPC, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -87,18 +115,18 @@ async function fetchTotalStaked() {
         jsonrpc: "2.0",
         id: 1,
         method: "eth_getStorageAt",
-        params: [STAKED_CONTRACT, slot, "latest"]
+        params: [STAKED_CONTRACT, "0xc", "latest"]
       })
     });
     const json = await res.json();
-    if (json.error) throw new Error(json.error.message);
-    const hex = json.result;
-    if (!hex || hex === "0x") return 0;
-    return Number(BigInt(hex));
+    if (!json.error && json.result) {
+      return hexToNumber(json.result);
+    }
   } catch (e) {
     console.warn("[fetchTotalStaked] Storage read failed:", e.message);
-    return 0;
   }
+
+  return 0;
 }
 
 // ── FETCH: ZLT balance of LP contract (ZLT locked in LP) ─────────────────────
