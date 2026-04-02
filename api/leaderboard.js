@@ -1,32 +1,59 @@
-// ── CONTRACTS ─────────────────────────────────────────────────────────────────
-const ZLT_CONTRACT    = "0x05D8762946fA7620b263E1e77003927addf5f7E6"; // ZLT token
-const OAT_CONTRACT    = "0x1d1C02F9fcff7EE2073a72181caE53563C82879C"; // POE NFT (beta OAT)
-const STAKED_CONTRACT = "0xa40984640D83230EE6Fa1d912E2030f8485b9eFc"; // NFT staking contract
-const LP_CONTRACT     = "0xAb168a06623eDe1b6b590733952cca4d7123f1F5"; // ZLT LP contract
+// ─────────────────────────────────────────────────────────────────────────────
+// CONTRACTS & CONSTANTS
+// ─────────────────────────────────────────────────────────────────────────────
+const ZLT_CONTRACT    = "0x05D8762946fA7620b263E1e77003927addf5f7E6";
+const OAT_CONTRACT    = "0x1d1C02F9fcff7EE2073a72181caE53563C82879C";
+const STAKED_CONTRACT = "0xa40984640D83230EE6Fa1d912E2030f8485b9eFc";
+const LP_CONTRACT     = "0xAb168a06623eDe1b6b590733952cca4d7123f1F5";
 
 const CHAIN    = "0x38"; // BNB Smart Chain
 const BASE_URL = "https://deep-index.moralis.io/api/v2.2";
-const BNB_RPC  = "https://bsc-dataseed.binance.org/"; // public BNB Chain RPC
+const BNB_RPC  = "https://bsc-dataseed.binance.org/";
 
-// ── SCORING FORMULA ───────────────────────────────────────────────────────────
-// volumePoints = Math.floor(volume24h / 1e18 / 100) * 5  → 5 pts per 100 ZLT in last 24h
-// swapPoints   = swapsCount * 5                          → 5 pts per transfer
-// poeBonus     = poeStaked ? 500 : 0
-// totalPoints  = volumePoints + swapPoints + poeBonus
-function computePoints(volume24h, swapsCount, poeStaked) {
-  const volumePoints = Math.floor(volume24h / 1e18 / 100) * 5;
-  const swapPoints   = swapsCount * 5;
-  const poeBonus     = poeStaked ? 500 : 0;
-  return volumePoints + swapPoints + poeBonus;
+// ─────────────────────────────────────────────────────────────────────────────
+// RATE LIMITER – ensures at most one Moralis call every 4 hours
+// ─────────────────────────────────────────────────────────────────────────────
+let lastMoralisFetch = 0;
+let moralisCache = null;
+const FOUR_HOURS_MS = 4 * 60 * 60 * 1000;
+
+async function getMoralisData() {
+  const now = Date.now();
+  if (moralisCache && (now - lastMoralisFetch) < FOUR_HOURS_MS) {
+    console.log(`[Cache] Using cached Moralis data (age ${Math.round((now - lastMoralisFetch) / 60000)} min)`);
+    return moralisCache;
+  }
+
+  console.log("[Cache] Fetching fresh Moralis data...");
+  const [oatHolders, transfers, nftStaked, zltInLPRaw] = await Promise.all([
+    fetchOATHolders(),
+    fetchZLTTransfers(),
+    fetchTotalStaked(),
+    fetchZLTInLP()
+  ]);
+  moralisCache = { oatHolders, transfers, nftStaked, zltInLPRaw };
+  lastMoralisFetch = now;
+  return moralisCache;
 }
 
-// ── MORALIS FETCH WRAPPER ─────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// SCORING
+// ─────────────────────────────────────────────────────────────────────────────
+function computePoints(volume24h, swapsCount, poeStaked) {
+  const volPts = Math.floor(volume24h / 1e18 / 100) * 5;
+  const swapPts = swapsCount * 5;
+  const poeBonus = poeStaked ? 500 : 0;
+  return volPts + swapPts + poeBonus;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MORALIS WRAPPER (requires env MORALIS_API_KEY)
+// ─────────────────────────────────────────────────────────────────────────────
 async function moralisFetch(path) {
-  const url = `${BASE_URL}${path}`;
-  const res = await fetch(url, {
+  const res = await fetch(`${BASE_URL}${path}`, {
     headers: {
       "X-API-Key": process.env.MORALIS_API_KEY,
-      "Accept":    "application/json"
+      Accept: "application/json"
     }
   });
   if (!res.ok) {
@@ -36,15 +63,12 @@ async function moralisFetch(path) {
   return res.json();
 }
 
-// ── FETCH: OAT NFT holders → Set of addresses (poeStaked detection) ───────────
 async function fetchOATHolders() {
   const holders = new Set();
   let cursor = null;
   do {
-    const cp   = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
-    const data = await moralisFetch(
-      `/nft/${OAT_CONTRACT}/owners?chain=${CHAIN}&format=decimal&limit=100${cp}`
-    );
+    const cp = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+    const data = await moralisFetch(`/nft/${OAT_CONTRACT}/owners?chain=${CHAIN}&format=decimal&limit=100${cp}`);
     if (Array.isArray(data.result)) {
       data.result.forEach(item => holders.add(item.owner_of.toLowerCase()));
     }
@@ -53,257 +77,160 @@ async function fetchOATHolders() {
   return holders;
 }
 
-// ── FETCH: ZLT transfers → raw array (up to 500, newest first) ───────────────
 async function fetchZLTTransfers() {
-  let all    = [];
-  let cursor = null;
-  let page   = 0;
-  const MAX  = 5; // 5 pages × 100 = 500 transfers
+  let all = [], cursor = null, page = 0;
+  const MAX_PAGES = 5;
   do {
-    const cp   = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
-    const data = await moralisFetch(
-      `/erc20/${ZLT_CONTRACT}/transfers?chain=${CHAIN}&limit=100&order=DESC${cp}`
-    );
+    const cp = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
+    const data = await moralisFetch(`/erc20/${ZLT_CONTRACT}/transfers?chain=${CHAIN}&limit=100&order=DESC${cp}`);
     if (!Array.isArray(data.result) || data.result.length === 0) break;
-    all    = all.concat(data.result);
+    all = all.concat(data.result);
     cursor = data.cursor || null;
     page++;
-  } while (cursor && page < MAX);
+  } while (cursor && page < MAX_PAGES);
   return all;
 }
 
-// ── FETCH: Total staked NFTs via direct BNB RPC ───────────────────────────────
-// The staking contract has a public uint256 variable `totalStaked`.
-// We first call the getter function (selector 0x4f2bfe5b) which is the most reliable.
-// If that fails, we fall back to reading storage slot 12 (0xc).
-// A sanity check rejects any value > 1,000,000 (realistic max for staked NFTs).
+// ─────────────────────────────────────────────────────────────────────────────
+// BNB RPC CALLS (no Moralis)
+// ─────────────────────────────────────────────────────────────────────────────
+async function rpcCall(to, data) {
+  const res = await fetch(BNB_RPC, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to, data }, "latest"] })
+  });
+  const json = await res.json();
+  if (json.error) throw new Error(json.error.message);
+  return json.result;
+}
+
+// totalStaked – use function selector first, fallback to storage slot 0xe
 async function fetchTotalStaked() {
-  // Helper to convert hex to number safely
-  const hexToNumber = (hex) => {
+  const hexToInt = (hex) => {
     if (!hex || hex === "0x") return 0;
     const val = Number(BigInt(hex));
-    return val > 1_000_000 ? 0 : val; // sanity check
+    return (val > 0 && val < 1_000_000) ? val : 0;
   };
-
-  // Try method 1: call totalStaked() function
   try {
-    const res = await fetch(BNB_RPC, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_call",
-        params: [{ to: STAKED_CONTRACT, data: "0x4f2bfe5b" }, "latest"]
-      })
-    });
-    const json = await res.json();
-    if (!json.error && json.result) {
-      const val = hexToNumber(json.result);
-      if (val > 0) return val;
-    }
-  } catch (e) {
-    console.warn("[fetchTotalStaked] Function call failed:", e.message);
-  }
-
-  // Fallback: read storage slot 12 (0xc)
+    const result = await rpcCall(STAKED_CONTRACT, "0x4f2bfe5b");
+    const val = hexToInt(result);
+    if (val) return val;
+  } catch (e) { /* fall through */ }
   try {
-    const res = await fetch(BNB_RPC, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        jsonrpc: "2.0",
-        id: 1,
-        method: "eth_getStorageAt",
-        params: [STAKED_CONTRACT, "0xc", "latest"]
-      })
-    });
-    const json = await res.json();
-    if (!json.error && json.result) {
-      return hexToNumber(json.result);
-    }
-  } catch (e) {
-    console.warn("[fetchTotalStaked] Storage read failed:", e.message);
-  }
-
+    const result = await rpcCall(STAKED_CONTRACT, "0xe"); // storage slot 14 decimal
+    const val = hexToInt(result);
+    if (val) return val;
+  } catch (e) { /* fall through */ }
+  console.warn("[fetchTotalStaked] Could not read totalStaked");
   return 0;
 }
 
-// ── FETCH: ZLT balance of LP contract (ZLT locked in LP) ─────────────────────
-// Uses direct BNB RPC to read PancakeSwap pair reserves.
-// Steps:
-//   1. Call token0() (0x0dfe1681) on LP_CONTRACT → address of token0
-//   2. Call token1() (0xd21220a7) on LP_CONTRACT → address of token1
-//   3. Call getReserves() (0x0902f1ac) → (reserve0 uint112, reserve1 uint112, blockTimestamp uint32)
-//   4. Match ZLT_CONTRACT to token0 or token1 → return the correct reserve as a string
+// ZLT reserve in LP pair
 async function fetchZLTInLP() {
   try {
-    // Helper: single eth_call returning a raw hex result
-    async function rpcCall(to, data) {
-      const res = await fetch(BNB_RPC, {
-        method:  "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id:      1,
-          method:  "eth_call",
-          params:  [{ to, data }, "latest"]
-        })
-      });
-      const json = await res.json();
-      if (json.error) throw new Error(json.error.message);
-      return json.result;
-    }
-
-    // 1. Read token0 and token1 in parallel
     const [hex0, hex1] = await Promise.all([
-      rpcCall(LP_CONTRACT, "0x0dfe1681"), // token0()
-      rpcCall(LP_CONTRACT, "0xd21220a7")  // token1()
+      rpcCall(LP_CONTRACT, "0x0dfe1681"),
+      rpcCall(LP_CONTRACT, "0xd21220a7")
     ]);
-
-    // ABI-decode address: strip 0x + leading 24 zero-padded bytes → last 20 bytes
     const token0 = ("0x" + hex0.slice(-40)).toLowerCase();
     const token1 = ("0x" + hex1.slice(-40)).toLowerCase();
-    const zlt    = ZLT_CONTRACT.toLowerCase();
-
-    // 2. Read reserves
-    const hexReserves = await rpcCall(LP_CONTRACT, "0x0902f1ac"); // getReserves()
-
-    // getReserves() returns three packed values in 96 bytes (3 × 32-byte slots):
-    //   slot 0 (bytes 0–63):   reserve0  (uint112, right-padded to 32 bytes)
-    //   slot 1 (bytes 64–127): reserve1  (uint112, right-padded to 32 bytes)
-    //   slot 2 (bytes 128–191): blockTimestampLast (uint32)
-    const raw = hexReserves.slice(2); // strip 0x
-    const reserve0 = BigInt("0x" + raw.slice(0,   64));
+    const zlt = ZLT_CONTRACT.toLowerCase();
+    const reservesHex = await rpcCall(LP_CONTRACT, "0x0902f1ac");
+    const raw = reservesHex.slice(2);
+    const reserve0 = BigInt("0x" + raw.slice(0, 64));
     const reserve1 = BigInt("0x" + raw.slice(64, 128));
-
-    // 3. Return the reserve that corresponds to ZLT
     if (token0 === zlt) return reserve0.toString();
     if (token1 === zlt) return reserve1.toString();
-
-    // ZLT not found in either slot — return "0" as fallback
-    console.warn("[fetchZLTInLP] ZLT not found in LP pair. token0:", token0, "token1:", token1);
+    console.warn("[fetchZLTInLP] ZLT not found in LP pair");
     return "0";
-
   } catch (e) {
-    console.warn("[fetchZLTInLP] RPC call failed:", e.message);
+    console.warn("[fetchZLTInLP] RPC failed:", e.message);
     return "0";
   }
 }
 
-// ── PROCESS: Build wallet map from transfers + enrich with NFT data ────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// DATA PROCESSING
+// ─────────────────────────────────────────────────────────────────────────────
 function processData(transfers, oatHolders) {
-  const map = {};
+  const map = new Map();
   const now = Date.now();
-  const DAY = 86400 * 1000;
+  const DAY_MS = 86400000;
 
-  transfers.forEach(tx => {
-    const addr = (tx.from_address || "").toLowerCase();
-    // Skip zero address (mints)
-    if (!addr || addr === "0x0000000000000000000000000000000000000000") return;
+  for (const tx of transfers) {
+    const addr = tx.from_address?.toLowerCase();
+    if (!addr || addr === "0x0000000000000000000000000000000000000000") continue;
+    const ts = new Date(tx.block_timestamp).getTime();
+    const val = parseInt(tx.value) || 0;
+    const is24h = (now - ts) < DAY_MS;
 
-    const ts    = new Date(tx.block_timestamp).getTime(); // ISO → ms
-    const val   = parseInt(tx.value) || 0;
-    const is24h = (now - ts) < DAY;
-
-    if (!map[addr]) {
-      map[addr] = {
-        address:     addr,
-        volume24h:   0,
-        totalVolume: 0,
-        swapsCount:  0,
-        poeStaked:   false,
-        points:      0
-      };
+    if (!map.has(addr)) {
+      map.set(addr, { address: addr, volume24h: 0, totalVolume: 0, swapsCount: 0, poeStaked: false });
     }
-    map[addr].swapsCount++;
-    map[addr].totalVolume += val;
-    if (is24h) map[addr].volume24h += val;
-  });
+    const entry = map.get(addr);
+    entry.swapsCount++;
+    entry.totalVolume += val;
+    if (is24h) entry.volume24h += val;
+  }
 
-  // Enrich: mark POE holders + also add OAT holders not in transfers
-  oatHolders.forEach(addr => {
-    if (!map[addr]) {
-      map[addr] = {
-        address:     addr,
-        volume24h:   0,
-        totalVolume: 0,
-        swapsCount:  0,
-        poeStaked:   true,
-        points:      0
-      };
+  for (const addr of oatHolders) {
+    if (!map.has(addr)) {
+      map.set(addr, { address: addr, volume24h: 0, totalVolume: 0, swapsCount: 0, poeStaked: true });
     } else {
-      map[addr].poeStaked = true;
+      map.get(addr).poeStaked = true;
     }
-  });
+  }
 
-  // Compute points for every wallet
-  Object.values(map).forEach(w => {
+  const wallets = Array.from(map.values());
+  for (const w of wallets) {
     w.points = computePoints(w.volume24h, w.swapsCount, w.poeStaked);
-  });
+  }
 
-  // Sort by points desc, take top 50, assign rank
-  return Object.values(map)
-    .sort((a, b) => b.points - a.points)
-    .slice(0, 50)
-    .map((w, i) => ({
-      rank:        i + 1,
-      address:     w.address,
-      volume24h:   w.volume24h,
-      swapsCount:  w.swapsCount,
-      poeStaked:   w.poeStaked,
-      points:      w.points
-    }));
+  wallets.sort((a, b) => b.points - a.points);
+  return wallets.slice(0, 50).map((w, i) => ({
+    rank: i + 1,
+    address: w.address,
+    volume24h: w.volume24h,
+    swapsCount: w.swapsCount,
+    poeStaked: w.poeStaked,
+    points: w.points
+  }));
 }
 
-// ── HANDLER ───────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// HANDLER (Vercel)
+// ─────────────────────────────────────────────────────────────────────────────
 export default async function handler(req, res) {
-  // CORS headers
-  res.setHeader("Access-Control-Allow-Origin",  "*");
+  // CORS & preflight
+  res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
-
   if (req.method === "OPTIONS") return res.status(200).end();
 
   if (!process.env.MORALIS_API_KEY) {
-    return res.status(500).json({
-      success: false,
-      error: "MORALIS_API_KEY is not set in Vercel environment variables."
-    });
+    return res.status(500).json({ success: false, error: "MORALIS_API_KEY missing" });
   }
 
   try {
-    // Run all independent fetches in parallel for speed
-    const [oatHolders, transfers, nftStaked, zltInLPRaw] = await Promise.all([
-      fetchOATHolders(),
-      fetchZLTTransfers(),
-      fetchTotalStaked(),
-      fetchZLTInLP()
-    ]);
-
+    const { oatHolders, transfers, nftStaked, zltInLPRaw } = await getMoralisData();
     const leaderboard = processData(transfers, oatHolders);
-
-    // totalWallets = unique wallets in leaderboard (covers transfer senders + OAT holders)
     const totalWallets = leaderboard.length;
 
-    // Cache for 4 hours on Vercel edge, serve stale for 1 hour while revalidating
-res.setHeader("Cache-Control", "s-maxage=14400, stale-while-revalidate=3600");
+    // Vercel edge cache – 4 hours, revalidate in background
+    res.setHeader("Cache-Control", "s-maxage=14400, stale-while-revalidate=3600");
 
     return res.status(200).json({
-      success:      true,
-      updatedAt:    new Date().toISOString(),
+      success: true,
+      updatedAt: new Date().toISOString(),
       totalWallets,
-      totalTxns:    transfers.length,
+      totalTxns: transfers.length,
       nftStaked,
-      zltInLP:      zltInLPRaw, // raw wei string — frontend formats it
+      zltInLP: zltInLPRaw,
       leaderboard
     });
-
   } catch (err) {
     console.error("[Leaderboard API Error]", err.message);
-    return res.status(500).json({
-      success: false,
-      error:   err.message
-    });
+    return res.status(500).json({ success: false, error: err.message });
   }
 }
