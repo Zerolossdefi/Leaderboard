@@ -72,32 +72,31 @@ async function fetchZLTTransfers() {
   return all;
 }
 
-// ── FETCH: Total staked NFTs via direct BNB RPC ───────────────────────────────
-// Reads the public uint256 variable `totalStaked` on STAKED_CONTRACT.
-// Function selector: keccak256("totalStaked()") = 0x4f2bfe5b
+// ── FETCH: Total staked NFTs via direct BNB RPC (storage slot method) ─────────
+// The staking contract has a public uint256 variable `totalStaked`.
+// Instead of using an ABI call (which can fail due to function selector mismatches),
+// we read the raw storage slot. Based on the contract's storage layout,
+// `totalStaked` is at slot 12 (decimal) = 0xc in hex.
 async function fetchTotalStaked() {
   try {
+    const slot = "0xc"; // storage slot 12 (decimal)
     const res = await fetch(BNB_RPC, {
-      method:  "POST",
+      method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         jsonrpc: "2.0",
-        id:      1,
-        method:  "eth_call",
-        params: [
-          { to: STAKED_CONTRACT, data: "0x4f2bfe5b" },
-          "latest"
-        ]
+        id: 1,
+        method: "eth_getStorageAt",
+        params: [STAKED_CONTRACT, slot, "latest"]
       })
     });
     const json = await res.json();
     if (json.error) throw new Error(json.error.message);
-    // Result is a 32-byte hex-encoded uint256
     const hex = json.result;
     if (!hex || hex === "0x") return 0;
     return Number(BigInt(hex));
   } catch (e) {
-    console.warn("[fetchTotalStaked] RPC call failed:", e.message);
+    console.warn("[fetchTotalStaked] Storage read failed:", e.message);
     return 0;
   }
 }
