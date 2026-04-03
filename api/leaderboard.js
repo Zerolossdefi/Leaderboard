@@ -8,11 +8,11 @@ const CHAIN    = "0x38";
 const BASE_URL = "https://deep-index.moralis.io/api/v2.2";
 const BNB_RPC  = "https://bsc-dataseed.binance.org/";
 
-// ── SCORING ─────────────────────────────────────────────────────────────────
+// ── SCORING (aligned with frontend ZPI: poeBonus = 400) ──────────────────────
 function computePoints(volume24h, swapsCount, poeStaked) {
   const volumePoints = Math.floor(volume24h / 1e18 / 100) * 5;
   const swapPoints   = swapsCount * 5;
-  const poeBonus     = poeStaked ? 500 : 0;
+  const poeBonus     = poeStaked ? 400 : 0;   // ✅ changed from 500 to 400
   return volumePoints + swapPoints + poeBonus;
 }
 
@@ -34,7 +34,7 @@ async function moralisFetch(path) {
 
 // ── FETCH: OAT NFT holders (address -> count) ───────────────────────────────
 async function fetchOATHolders() {
-  const holderCount = new Map(); // address -> number of OAT NFTs
+  const holderCount = new Map();
   let cursor = null;
   do {
     const cp = cursor ? `&cursor=${encodeURIComponent(cursor)}` : "";
@@ -69,9 +69,8 @@ async function fetchZLTTransfers() {
   return all;
 }
 
-// ── FETCH: ZLT balance for a list of addresses (batch via parallel calls) ────
+// ── FETCH: ZLT balance for a list of addresses ──────────────────────────────
 async function fetchZLTBalances(addresses) {
-  // Use a set to avoid duplicate addresses
   const unique = [...new Set(addresses)];
   const results = await Promise.all(
     unique.map(async (addr) => {
@@ -138,17 +137,13 @@ async function fetchZLTInLP() {
   } catch(e) { console.warn("fetchZLTInLP failed", e.message); return "0"; }
 }
 
-// ── FETCH: LP amount for a list of addresses (from staking contract) ────────
-// This is a placeholder – replace with real staking contract queries when available.
-// For now, we return a deterministic "mock" based on address hash, but we will mark it as `lpAmountReal: false`.
+// ── FETCH: LP amount for a list of addresses (placeholder) ──────────────────
+// TODO: replace with real on‑chain reads from staking contract
 async function fetchLPAmounts(addresses) {
-  // TODO: Replace with actual on‑chain reads from the staking contract (e.g., userInfo.amount).
-  // Example: call `userInfo(address)` on STAKED_CONTRACT.
-  // For now, return a placeholder to avoid breaking the UI.
   const map = new Map();
   addresses.forEach(addr => {
     const hash = parseInt(addr.slice(-8), 16);
-    const lpAmount = (hash % 50000) + 1000; // deterministic, but fake
+    const lpAmount = (hash % 50000) + 1000;
     map.set(addr, lpAmount);
   });
   return map;
@@ -160,7 +155,6 @@ function processData(transfers, oatCounts, zltBalances, lpAmounts) {
   const now = Date.now();
   const DAY_MS = 86400000;
 
-  // 1. Process transfers to get volume and swap count
   for (const tx of transfers) {
     const addr = tx.from_address?.toLowerCase();
     if (!addr || addr === "0x0000000000000000000000000000000000000000") continue;
@@ -186,7 +180,6 @@ function processData(transfers, oatCounts, zltBalances, lpAmounts) {
     if (is24h) entry.volume24h += val;
   }
 
-  // 2. Add OAT holders (even if they never transferred)
   for (const [addr, count] of oatCounts.entries()) {
     if (!map.has(addr)) {
       map.set(addr, {
@@ -205,21 +198,19 @@ function processData(transfers, oatCounts, zltBalances, lpAmounts) {
     }
   }
 
-  // 3. Fill ZLT balances and LP amounts
   for (const [addr, entry] of map.entries()) {
     entry.zltBalance = zltBalances.get(addr) || 0n;
     entry.lpAmount = lpAmounts.get(addr) || 0;
     if (!entry.nftCount && oatCounts.has(addr)) entry.nftCount = oatCounts.get(addr);
   }
 
-  // 4. Compute points and prepare output
   const wallets = Array.from(map.values());
   for (const w of wallets) {
     w.points = computePoints(w.volume24h, w.swapsCount, w.poeStaked);
   }
   wallets.sort((a,b) => b.points - a.points);
   return wallets.slice(0, 50).map(w => ({
-    rank: 0, // will be set by frontend
+    rank: 0,
     address: w.address,
     volume24h: w.volume24h,
     swapsCount: w.swapsCount,
@@ -242,7 +233,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Parallel fetching of independent data
     const [oatCounts, transfers, nftStaked, zltInLP] = await Promise.all([
       fetchOATHolders(),
       fetchZLTTransfers(),
@@ -250,7 +240,6 @@ export default async function handler(req, res) {
       fetchZLTInLP()
     ]);
 
-    // Collect all unique addresses from transfers and OAT holders
     const allAddresses = new Set();
     for (const tx of transfers) {
       const addr = tx.from_address?.toLowerCase();
@@ -258,7 +247,6 @@ export default async function handler(req, res) {
     }
     for (const addr of oatCounts.keys()) allAddresses.add(addr);
 
-    // Fetch real balances and LP amounts for these addresses
     const [zltBalances, lpAmounts] = await Promise.all([
       fetchZLTBalances([...allAddresses]),
       fetchLPAmounts([...allAddresses])
