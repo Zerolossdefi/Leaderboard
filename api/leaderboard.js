@@ -8,28 +8,63 @@ const CHAIN    = "0x38";
 const BASE_URL = "https://deep-index.moralis.io/api/v2.2";
 const BNB_RPC  = "https://bsc-dataseed.binance.org/";
 
-// ── SCORING (aligned with frontend ZPI: poeBonus = 400) ──────────────────────
+// ── MULTIPLE MORALIS API KEYS ROTATION ───────────────────────────────────────
+// Environment variables: MORALIS_API_KEY, MORALIS_API_KEY_2, MORALIS_API_KEY_3, ...
+const MORALIS_KEYS = [
+  process.env.MORALIS_API_KEY,
+  process.env.MORALIS_API_KEY_2,
+  process.env.MORALIS_API_KEY_3,
+  process.env.MORALIS_API_KEY_4,
+  process.env.MORALIS_API_KEY_5
+].filter(Boolean); // remove undefined entries
+
+if (MORALIS_KEYS.length === 0) {
+  throw new Error("No Moralis API keys found in environment variables");
+}
+
+// ── MORALIS FETCH WITH AUTO-ROTATION ─────────────────────────────────────────
+async function moralisFetch(path) {
+  let lastError = null;
+
+  for (let i = 0; i < MORALIS_KEYS.length; i++) {
+    const key = MORALIS_KEYS[i];
+    try {
+      const url = `${BASE_URL}${path}`;
+      const res = await fetch(url, {
+        headers: {
+          "X-API-Key": key,
+          "Accept":    "application/json"
+        }
+      });
+
+      if (res.status === 401) {
+        // Unauthorized – key quota exhausted or invalid
+        console.warn(`Moralis key ${i + 1} returned 401, trying next...`);
+        lastError = new Error(`Key ${i + 1} unauthorized`);
+        continue;
+      }
+
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(`Moralis ${res.status} on ${path}: ${body.message || res.statusText}`);
+      }
+
+      return res.json();
+    } catch (err) {
+      console.warn(`Moralis key ${i + 1} failed:`, err.message);
+      lastError = err;
+      // continue to next key
+    }
+  }
+
+  throw new Error(`All Moralis API keys exhausted or failed: ${lastError?.message}`);
+}
+
+// ── SCORING (legacy – not used, kept for compatibility) ──────────────────────
 function computePoints(volume24h, swapsCount, poeStaked) {
   const volumePoints = Math.floor(volume24h / 1e18 / 100) * 5;
   const swapPoints   = swapsCount * 5;
-  const poeBonus     = poeStaked ? 400 : 0;   // ✅ changed from 500 to 400
-  return volumePoints + swapPoints + poeBonus;
-}
-
-// ── MORALIS FETCH WRAPPER ─────────────────────────────────────────────────
-async function moralisFetch(path) {
-  const url = `${BASE_URL}${path}`;
-  const res = await fetch(url, {
-    headers: {
-      "X-API-Key": process.env.MORALIS_API_KEY,
-      "Accept":    "application/json"
-    }
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(`Moralis ${res.status} on ${path}: ${body.message || res.statusText}`);
-  }
-  return res.json();
+  return volumePoints + swapPoints;
 }
 
 // ── FETCH: OAT NFT holders (address -> count) ───────────────────────────────
@@ -69,21 +104,35 @@ async function fetchZLTTransfers() {
   return all;
 }
 
-// ── FETCH: ZLT balance for a list of addresses ──────────────────────────────
+// ── FETCH: ZLT balance for each address via direct BEP-20 balanceOf RPC ───────
 async function fetchZLTBalances(addresses) {
   const unique = [...new Set(addresses)];
+
   const results = await Promise.all(
     unique.map(async (addr) => {
       try {
-        const data = await moralisFetch(
-          `/erc20/${ZLT_CONTRACT}/balance?chain=${CHAIN}&address=${addr}`
-        );
-        return { address: addr, balance: data.balance || "0" };
+        const paddedAddr = addr.replace("0x", "").toLowerCase().padStart(64, "0");
+        const callData   = "0x70a08231" + paddedAddr;
+        const res = await fetch(BNB_RPC, {
+          method:  "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0", id: 1,
+            method:  "eth_call",
+            params:  [{ to: ZLT_CONTRACT, data: callData }, "latest"]
+          })
+        });
+        const json = await res.json();
+        if (json.error || !json.result || json.result === "0x") {
+          return { address: addr, balance: "0" };
+        }
+        return { address: addr, balance: BigInt(json.result).toString() };
       } catch {
         return { address: addr, balance: "0" };
       }
     })
   );
+
   const balanceMap = new Map();
   results.forEach(r => balanceMap.set(r.address, BigInt(r.balance)));
   return balanceMap;
@@ -210,12 +259,10 @@ function processData(transfers, oatCounts, zltBalances, lpAmounts) {
   }
   wallets.sort((a,b) => b.points - a.points);
   return wallets.slice(0, 50).map(w => ({
-    rank: 0,
     address: w.address,
     volume24h: w.volume24h,
     swapsCount: w.swapsCount,
     poeStaked: w.poeStaked,
-    points: w.points,
     nftCount: w.nftCount,
     zltBalance: w.zltBalance.toString(),
     lpAmount: w.lpAmount
@@ -228,10 +275,8 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
   if (req.method === "OPTIONS") return res.status(200).end();
-  if (!process.env.MORALIS_API_KEY) {
-    return res.status(500).json({ success: false, error: "MORALIS_API_KEY missing" });
-  }
 
+  // No need to check for a single key – we already validated MORALIS_KEYS length
   try {
     const [oatCounts, transfers, nftStaked, zltInLP] = await Promise.all([
       fetchOATHolders(),
