@@ -280,58 +280,63 @@ async function fetchZLTPrice() {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// LP DURATION MULTIPLIER
-// ─────────────────────────────────────────────────────────────────────────────
-function lpMultiplier(lpStartTime) {
-  const days = (Date.now() - lpStartTime) / 86400000;
-  if (days < 7)  return 0.5;
-  if (days < 30) return 1.0;
-  if (days < 60) return 1.5;
-  return 2.0;
+// LP DURATION MULTIPLIER — kept for lpDays display only (not used in scoring)
+function lpDaysFromAddr(addr) {
+  return parseInt(addr.slice(-8), 16) % 91; // 0-90 days, deterministic
+}
+function lpStatusFromDays(days) {
+  if (days >= 30) return "boosted";
+  if (days >= 7)  return "active";
+  return "new";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ZPI SCORING ENGINE
-// All inputs are plain numbers (not wei), price-adjusted where noted.
-// Formula per spec:
-//   tradingScore = sqrt( min(tradeVolumeUSD, lpUSD * 3) )
-//   lpScore      = lpUSD * lpMultiplier(lpStartTime)
-//   holdingScore = zltBalance + (nftCount * 300000)
-//   ZPI          = (tradingScore * 0.4) + (lpScore * 0.45) + (holdingScore * 0.15)
-//   poeBonus     = poeStaked ? 400 : 0   (added to ZPI)
+// ZPI SCORING ENGINE — updated formulas, no poeBonus anywhere
+//
+//   ZPI_trading  = 1020 × Volume_USD
+//   ZPI_liquidity = 2030 × Value_USD
+//   ZPI_holding  = (nftCount × 10000) + floor(ZLT_balance / 100000) × 3050
+//   ZPI_total    = ZPI_trading + ZPI_liquidity + ZPI_holding
+//
+// Notes:
+//   • volume24h from API is raw wei (uint, not string) → divide by 1e18 for ZLT
+//   • zltBalance from API is a wei string (from balanceOf) → divide by 1e18
+//   • lpAmount from API is plain ZLT units → multiply by zltPriceUSD for USD
+//   • All scores are integers (Math.floor / Math.round)
 // ─────────────────────────────────────────────────────────────────────────────
+const NFT_WEIGHT = 10000;
+
 function calcZPI(w) {
+  // ── Trading ──────────────────────────────────────────────────────────────
   const tradeVolumeUSD = (Number(w.volume24h) / 1e18) * zltPriceUSD;
-  // lpAmount from API is plain ZLT units (not wei)
-  const lpUSD          = (w.lpAmount || 0) * zltPriceUSD;
-  // zltBalance from API is wei string
-  const zltBal         = Number(w.zltBalance || "0") / 1e18;
-  const nftCount       = w.nftCount || 0;
+  const tScore         = Math.floor(1020 * tradeVolumeUSD);
 
-  // LP start time: API does not provide it yet → deterministic mock from address
-  // (will be replaced when API exposes lpStartTime)
-  const addrSeed  = parseInt(w.address.slice(-8), 16);
-  const daysAgo   = (addrSeed % 91); // 0-90 days
-  const lpStart   = Date.now() - daysAgo * 86400000;
+  // ── Liquidity ─────────────────────────────────────────────────────────────
+  const lpUSD  = (w.lpAmount || 0) * zltPriceUSD;
+  const lScore = Math.floor(2030 * lpUSD);
 
-  const tScore = Math.sqrt(Math.max(Math.min(tradeVolumeUSD, lpUSD * 3), 0));
-  const lScore = lpUSD * lpMultiplier(lpStart);
-  const hScore = zltBal + (nftCount * 300000);
-  const zpi    = (tScore * 0.4) + (lScore * 0.45) + (hScore * 0.15);
-  const poeBonus = w.poeStaked ? 400 : 0;
+  // LP display helpers (deterministic from address until API provides lpStartTime)
+  const lpDays = lpDaysFromAddr(w.address);
+
+  // ── Holding ───────────────────────────────────────────────────────────────
+  // zltBalance is a wei string from balanceOf(wallet) on ZLT contract
+  const zltBal   = Number(w.zltBalance || "0") / 1e18;
+  const nftCount = w.nftCount || 0;
+  const hScore   = (nftCount * NFT_WEIGHT) + (Math.floor(zltBal / 100000) * 3050);
+
+  // ── Total ZPI ─────────────────────────────────────────────────────────────
+  const zpi = tScore + lScore + hScore;
 
   return {
-    zpi:           Math.round(zpi + poeBonus),
-    tScore:        Math.round(tScore),
-    lScore:        Math.round(lScore),
-    hScore:        Math.round(hScore),
-    poeBonus,
+    zpi,
+    tScore,
+    lScore,
+    hScore,
     tradeVolumeUSD,
     lpUSD,
     zltBal,
     nftCount,
-    lpStart,
-    lpDays:        daysAgo
+    lpDays
   };
 }
 
@@ -349,7 +354,7 @@ function enrich(w) {
 const HEADERS = {
   overall:   ["#","Wallet","ZPI Score","Trading","LP","Holding","Chg"],
   trading:   ["#","Wallet","Volume (ZLT)","Volume ($)","Trades","Score"],
-  liquidity: ["#","Wallet","LP Amount","$ Value","Days","Status","Score"],
+  liquidity: ["#","Wallet","LP Amount","Value ($)","Days","Status","Score"],
   holding:   ["#","Wallet","ZLT Balance","NFTs","Score"]
 };
 
@@ -410,9 +415,9 @@ function miniScores(w, maxT, maxL, maxH) {
 }
 
 function lpStatusBadge(days) {
-  if (days >= 30) return '<span class="zl-lp-badge boosted">Boosted</span>';
-  if (days >= 7)  return '<span class="zl-lp-badge active">Active</span>';
-  return '<span class="zl-lp-badge new">New</span>';
+  const s = lpStatusFromDays(days);
+  const label = s === "boosted" ? "Boosted" : s === "active" ? "Active" : "New";
+  return `<span class="zl-lp-badge ${s}">${label}</span>`;
 }
 
 function changeCell(w) {
@@ -470,13 +475,12 @@ function renderTable(wallets, tab) {
 
     } else if (tab === "liquidity") {
       const maxLS = Math.max(...wallets.map(x=>x.lScore),1);
-      const mult  = lpMultiplier(w.lpStart).toFixed(1) + "x";
       cells = `
         <td>${rankCell(rank)}</td>
         <td>${walletCell(w,i)}</td>
         <td class="zl-mono">${fmtZLT(w.lpAmount||0)}</td>
         <td class="zl-mono">${fmtUSD(w.lpUSD)}</td>
-        <td><span class="zl-mono">${w.lpDays}d</span><div class="zl-sub">${mult} mult</div></td>
+        <td><span class="zl-mono">${w.lpDays}d</span></td>
         <td>${lpStatusBadge(w.lpDays)}</td>
         <td class="r">${scoreBar(w.lScore,maxLS)}</td>`;
 
