@@ -6,6 +6,8 @@
   <title>Zeroloss ZPI Leaderboard — Season 1</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@400;600&display=swap" rel="stylesheet" />
+  <!-- Favicon: Zeroloss logo -->
+  <link rel="icon" type="image/png" href="./zeroloss-logo.png" />
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     :root {
@@ -24,6 +26,7 @@
     /* ── Header ─────────────────────────────────────────────────────────── */
     .zl-header { display:flex; align-items:center; justify-content:space-between; margin-bottom:24px; flex-wrap:wrap; gap:12px; }
     .zl-brand { display:flex; align-items:center; gap:12px; }
+    .zl-logo-img { width:44px; height:44px; border-radius:50%; object-fit:cover; box-shadow:0 0 20px var(--ga40); background:#000; }
     .zl-brand-text { font-size:20px; font-weight:700; color:#fff; letter-spacing:-0.3px; }
     .zl-brand-sub { font-size:11px; color:var(--gold); font-weight:600; letter-spacing:1.8px; text-transform:uppercase; margin-top:2px; }
     .zl-season-badge { background:var(--ga12); border:1px solid var(--ga30); border-radius:20px; padding:7px 16px; font-size:12px; font-weight:600; color:var(--gold); letter-spacing:0.5px; }
@@ -66,70 +69,19 @@
     .zl-rwd span { color:var(--gold); font-weight:600; font-family:'JetBrains Mono',monospace; }
 
     /* ── ZPI Info bar ───────────────────────────────────────────────────── */
-    .zl-info-bar {
-      background: var(--ga08);
-      border: 1px solid var(--ga20);
-      border-radius: 10px;
-      padding: 10px 18px;
-      margin-bottom: 14px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      flex-wrap: wrap;
-    }
-    .zl-info-bar-label {
-      font-size: 10px;
-      font-weight: 700;
-      color: var(--gold);
-      text-transform: uppercase;
-      letter-spacing: 1.2px;
-      white-space: nowrap;
-      flex-shrink: 0;
-    }
-    .zl-info-bar-divider {
-      width: 1px;
-      height: 14px;
-      background: var(--ga30);
-      flex-shrink: 0;
-    }
-    .zl-info-bar-items {
-      display: flex;
-      align-items: center;
-      gap: 0;
-      flex-wrap: wrap;
-      flex: 1;
-    }
-    .zl-info-item {
-      font-size: 11px;
-      color: #888;
-      white-space: nowrap;
-      padding: 2px 0;
-    }
-    .zl-info-item strong {
-      color: #C8C8C8;
-      font-weight: 600;
-    }
-    .zl-info-item .pts {
-      color: var(--gold);
-      font-family: 'JetBrains Mono', monospace;
-      font-weight: 600;
-      font-size: 11px;
-    }
-    .zl-info-sep {
-      color: var(--ga40);
-      padding: 0 8px;
-      font-size: 12px;
-      flex-shrink: 0;
-    }
-    /* Mobile: two rows — label+first two items / last two items */
-    @media (max-width: 600px) {
-      .zl-info-bar { flex-direction: column; align-items: flex-start; gap: 8px; }
-      .zl-info-bar-divider { display: none; }
-      .zl-info-bar-items { gap: 0; }
-      .zl-info-row-break { display: block; width: 100%; height: 0; }
-    }
-    @media (min-width: 601px) {
-      .zl-info-row-break { display: none; }
+    .zl-info-bar { background:var(--ga08); border:1px solid var(--ga20); border-radius:10px; padding:10px 18px; margin-bottom:14px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+    .zl-info-bar-label { font-size:10px; font-weight:700; color:var(--gold); text-transform:uppercase; letter-spacing:1.2px; white-space:nowrap; flex-shrink:0; }
+    .zl-info-bar-divider { width:1px; height:14px; background:var(--ga30); flex-shrink:0; }
+    .zl-info-bar-items { display:flex; align-items:center; gap:0; flex-wrap:wrap; flex:1; }
+    .zl-info-item { font-size:11px; color:#888; white-space:nowrap; padding:2px 0; }
+    .zl-info-item strong { color:#C8C8C8; font-weight:600; }
+    .zl-info-item .pts { color:var(--gold); font-family:'JetBrains Mono',monospace; font-weight:600; font-size:11px; }
+    .zl-info-sep { color:var(--ga40); padding:0 8px; font-size:12px; flex-shrink:0; }
+    .zl-info-row-break { display:none; width:100%; height:0; }
+    @media(max-width:600px){
+      .zl-info-bar { flex-direction:column; align-items:flex-start; gap:8px; }
+      .zl-info-bar-divider { display:none; }
+      .zl-info-row-break { display:block; }
     }
 
     /* ── Tabs ───────────────────────────────────────────────────────────── */
@@ -178,10 +130,23 @@
     .zl-state-row.error   { color:#EF4444; }
 
     /* ── Footer ─────────────────────────────────────────────────────────── */
-    .zl-footer { margin-top:24px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; }
+    .zl-footer { margin-top:28px; border-top:1px solid rgba(255,255,255,0.05); padding-top:20px; display:flex; flex-direction:column; gap:14px; }
+    .zl-footer-row { display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:12px; }
     .zl-footer-note { font-size:11px; color:#333; }
     .zl-connect-btn { background:linear-gradient(135deg,var(--gold),var(--gold2)); color:#0A0B0D; border:none; border-radius:10px; padding:12px 24px; font-size:14px; font-weight:700; cursor:pointer; font-family:'Space Grotesk',sans-serif; box-shadow:0 0 24px var(--ga30); transition:all 0.2s; }
     .zl-connect-btn:hover { box-shadow:0 0 32px var(--ga40); transform:translateY(-1px); }
+
+    /* Social links */
+    .zl-socials { display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+    .zl-social-label { font-size:10px; color:#333; text-transform:uppercase; letter-spacing:1px; font-weight:500; margin-right:4px; }
+    .zl-social-link {
+      display:flex; align-items:center; justify-content:center;
+      width:32px; height:32px; border-radius:8px;
+      background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.07);
+      color:#555; text-decoration:none; transition:all 0.2s;
+    }
+    .zl-social-link:hover { background:var(--ga12); border-color:var(--ga25); color:var(--gold); transform:translateY(-1px); }
+    .zl-social-link svg { width:15px; height:15px; fill:currentColor; flex-shrink:0; }
   </style>
 </head>
 <body>
@@ -193,7 +158,10 @@
     <!-- Header -->
     <div class="zl-header">
       <div class="zl-brand">
-        <div style="width:44px;height:44px;border-radius:50%;background:var(--ga20);display:flex;align-items:center;justify-content:center;font-size:18px;font-weight:700;color:var(--gold);box-shadow:0 0 20px var(--ga40)">Z</div>
+        <!-- Zeroloss logo — place zeroloss-logo.png in your project root -->
+        <img class="zl-logo-img" src="./zeroloss-logo.png" alt="Zeroloss"
+             onerror="this.style.display='none';document.getElementById('logoFallback').style.display='flex'" />
+        <div id="logoFallback" style="display:none;width:44px;height:44px;border-radius:50%;background:var(--ga20);align-items:center;justify-content:center;font-size:18px;font-weight:700;color:var(--gold);box-shadow:0 0 20px var(--ga40)">Z</div>
         <div>
           <div class="zl-brand-text">Zeroloss</div>
           <div class="zl-brand-sub">ZPI Leaderboard</div>
@@ -252,12 +220,12 @@
       </div>
       <div class="zl-reward-breakdown">
         <div class="zl-rwd">Top Traders <span>9M</span></div>
-        <div class="zl-rwd">POE (NFT) Holders <span>5M</span></div>
+        <div class="zl-rwd">LP Holders <span>5M</span></div>
         <div class="zl-rwd">Community Tasks <span>3M</span></div>
       </div>
     </div>
 
-    <!-- ── ZPI Info bar (static) ──────────────────────────────────────── -->
+    <!-- ZPI Info bar (static) -->
     <div class="zl-info-bar">
       <span class="zl-info-bar-label">Earn ZPI</span>
       <div class="zl-info-bar-divider"></div>
@@ -265,7 +233,6 @@
         <span class="zl-info-item"><strong>Trading</strong> $1 → <span class="pts">1,020 pts</span></span>
         <span class="zl-info-sep">•</span>
         <span class="zl-info-item"><strong>Liquidity</strong> $1 → <span class="pts">2,030 pts</span></span>
-        <!-- break after 2nd item on mobile -->
         <span class="zl-info-row-break"></span>
         <span class="zl-info-sep">•</span>
         <span class="zl-info-item"><strong>Holding</strong> 100k ZLT → <span class="pts">+3,050 pts</span></span>
@@ -273,7 +240,6 @@
         <span class="zl-info-item"><strong>Zeroloss NFT</strong> → <span class="pts">+10,000 pts</span></span>
       </div>
     </div>
-    <!-- ──────────────────────────────────────────────────────────────── -->
 
     <!-- Tabs -->
     <div class="zl-tabs">
@@ -297,12 +263,49 @@
 
     <!-- Footer -->
     <div class="zl-footer">
-      <div class="zl-footer-note" id="footerNote">Live · BNB Chain · ZPI Score · leaderboard.zeroloss.app</div>
-      <button class="zl-connect-btn" onclick="window.location.href='https://zeroloss.app'">Connect Wallet</button>
+      <!-- Row 1: socials + connect button -->
+      <div class="zl-footer-row">
+        <div class="zl-socials">
+          <span class="zl-social-label">Follow</span>
+
+          <!-- Twitter / X -->
+          <a class="zl-social-link" href="https://x.com/zerolossdefi" target="_blank" rel="noopener" title="Twitter / X">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.746l7.73-8.835L1.254 2.25H8.08l4.253 5.622zm-1.161 17.52h1.833L7.084 4.126H5.117z"/></svg>
+          </a>
+
+          <!-- LinkedIn -->
+          <a class="zl-social-link" href="https://www.linkedin.com/company/zerolossdefi" target="_blank" rel="noopener" title="LinkedIn">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M20.447 20.452h-3.554v-5.569c0-1.328-.027-3.037-1.852-3.037-1.853 0-2.136 1.445-2.136 2.939v5.667H9.351V9h3.414v1.561h.046c.477-.9 1.637-1.85 3.37-1.85 3.601 0 4.267 2.37 4.267 5.455v6.286zM5.337 7.433a2.062 2.062 0 0 1-2.063-2.065 2.064 2.064 0 1 1 2.063 2.065zm1.782 13.019H3.555V9h3.564v11.452zM22.225 0H1.771C.792 0 0 .774 0 1.729v20.542C0 23.227.792 24 1.771 24h20.451C23.2 24 24 23.227 24 22.271V1.729C24 .774 23.2 0 22.222 0h.003z"/></svg>
+          </a>
+
+          <!-- Telegram -->
+          <a class="zl-social-link" href="https://t.me/zerolossgroup" target="_blank" rel="noopener" title="Telegram">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
+          </a>
+
+          <!-- Discord -->
+          <a class="zl-social-link" href="https://discord.gg/WVt2WTrxgT" target="_blank" rel="noopener" title="Discord">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057c.002.022.015.043.03.056a19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z"/></svg>
+          </a>
+
+          <!-- Farcaster / Warpcast -->
+          <a class="zl-social-link" href="https://warpcast.com/zeroloss" target="_blank" rel="noopener" title="Farcaster">
+            <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path d="M11.707 0h.586C18.325 0 24 5.373 24 12s-5.675 12-11.707 12h-.586C5.675 24 0 18.627 0 12S5.675 0 11.707 0zM6.5 7.5v9h2V13h3v3.5h2v-9h-2V11h-3V7.5z"/></svg>
+          </a>
+        </div>
+
+        <button class="zl-connect-btn" onclick="window.location.href='https://zeroloss.app'">Connect Wallet</button>
+      </div>
+
+      <!-- Row 2: copyright / data note -->
+      <div class="zl-footer-row">
+        <div class="zl-footer-note" id="footerNote">Live · BNB Chain · ZPI Score · leaderboard.zeroloss.app</div>
+        <div class="zl-footer-note">© 2026 Zeroloss. Data refreshes every 4 hours.</div>
+      </div>
     </div>
 
-  </div>
-</div>
+  </div><!-- /.zl-content -->
+</div><!-- /.zl-root -->
 
 <script>
 // ─────────────────────────────────────────────────────────────────────────────
@@ -317,7 +320,7 @@ const SEASON_START = new Date(Date.UTC(2026, 3, 6, 0, 0, 0));
 const SEASON_END   = new Date(Date.UTC(2026, 4, 6, 23, 59, 59));
 
 // ─────────────────────────────────────────────────────────────────────────────
-// STATE  — all scores come from the API, nothing computed here
+// STATE
 // ─────────────────────────────────────────────────────────────────────────────
 let allData      = [];
 let currentTab   = "overall";
@@ -328,7 +331,6 @@ let zltPriceUSD  = null;
 // FORMAT HELPERS
 // ─────────────────────────────────────────────────────────────────────────────
 const pad = n => String(n).padStart(2, "0");
-
 function fmtShort(n) {
   if (n >= 1e6) return (n/1e6).toFixed(1) + "M";
   if (n >= 1e3) return (n/1e3).toFixed(1) + "K";
@@ -358,7 +360,6 @@ function fmtScore(n) {
   return Math.round(n).toLocaleString();
 }
 function fmtAddr(a) { return a.slice(0,6) + "…" + a.slice(-4); }
-
 function zltWeiToUSD(weiStr) {
   if (!zltPriceUSD) return null;
   return (Number(BigInt(weiStr || "0")) / 1e18) * zltPriceUSD;
@@ -373,11 +374,10 @@ function zltToUSD(n) {
 // ─────────────────────────────────────────────────────────────────────────────
 const HEADERS = {
   overall:   ["#", "Wallet", "ZPI Score", "Trading", "LP Value", "ZLT Balance"],
-  trading:   ["#", "Wallet", "Volume (ZLT)", "Volume ($)", "Trades", "ZPI Score"],
-  liquidity: ["#", "Wallet", "LP (ZLT)", "LP Value ($)", "Status", "ZPI Score"],
-  holding:   ["#", "Wallet", "ZLT Balance", "NFTs", "ZPI Score"],
+  trading:   ["#", "Wallet", "Volume (ZLT)", "Volume ($)", "Trades", "Score"],
+  liquidity: ["#", "Wallet", "LP (ZLT)", "LP Value ($)", "Status", "Score"],
+  holding:   ["#", "Wallet", "ZLT Balance", "NFTs", "Score"],
 };
-
 function renderHeaders(tab) {
   const tr = document.createElement("tr");
   HEADERS[tab].forEach((h, i) => {
@@ -396,13 +396,12 @@ function renderHeaders(tab) {
 // ─────────────────────────────────────────────────────────────────────────────
 function rankCell(rank) {
   const medals = ["🥇","🥈","🥉"];
-  const cls = rank === 1 ? "r1" : rank === 2 ? "r2" : rank === 3 ? "r3" : "";
-  return `<span class="zl-rank ${cls}">${rank <= 3 ? medals[rank-1] : rank}</span>`;
+  const cls = rank===1?"r1":rank===2?"r2":rank===3?"r3":"";
+  return `<span class="zl-rank ${cls}">${rank<=3?medals[rank-1]:rank}</span>`;
 }
-
 function walletCell(w, idx) {
   const color  = AVATARS[idx % AVATARS.length];
-  const init   = w.address.slice(2, 4).toUpperCase();
+  const init   = w.address.slice(2,4).toUpperCase();
   const badges = [];
   if (w.poeStaked)             badges.push('<span class="zl-badge poe">POE</span>');
   if (w.swapsCount > 150)      badges.push('<span class="zl-badge whale">Whale</span>');
@@ -415,17 +414,15 @@ function walletCell(w, idx) {
     </div>
   </div>`;
 }
-
 function scoreBar(score, maxScore) {
-  const pct = maxScore > 0 ? Math.round((score / maxScore) * 100) : 0;
+  const pct = maxScore>0 ? Math.round((score/maxScore)*100) : 0;
   return `<div class="zl-zpi-val">${fmtScore(score)}</div>
     <div class="zl-zpi-bar-bg"><div class="zl-zpi-bar" style="width:${pct}%"></div></div>`;
 }
-
 function miniScores(w, maxT, maxL, maxH) {
-  const tw = maxT > 0 ? Math.max(Math.round((w.tScore/maxT)*60), 4) : 4;
-  const lw = maxL > 0 ? Math.max(Math.round((w.lScore/maxL)*60), 4) : 4;
-  const hw = maxH > 0 ? Math.max(Math.round((w.hScore/maxH)*60), 4) : 4;
+  const tw = maxT>0 ? Math.max(Math.round((w.tScore/maxT)*60),4) : 4;
+  const lw = maxL>0 ? Math.max(Math.round((w.lScore/maxL)*60),4) : 4;
+  const hw = maxH>0 ? Math.max(Math.round((w.hScore/maxH)*60),4) : 4;
   return `<div class="zl-mini-scores">
     <div class="zl-mini-bar t" style="width:${tw}px" title="Trading"></div>
     <div class="zl-mini-bar l" style="width:${lw}px" title="Liquidity"></div>
@@ -439,93 +436,81 @@ function miniScores(w, maxT, maxL, maxH) {
 function renderTable(wallets, tab) {
   renderHeaders(tab);
   const tbody = document.getElementById("leaderBody");
-
   if (!wallets.length) {
     tbody.innerHTML = `<tr><td colspan="8" class="zl-state-row">No data found.</td></tr>`;
     return;
   }
-
-  // Max values for bar scaling — scoped to the current sorted list
-  const maxZPI = Math.max(...wallets.map(w => w.zpi), 1);
-  const maxT   = Math.max(...wallets.map(w => w.tScore), 1);
-  const maxL   = Math.max(...wallets.map(w => w.lScore), 1);
-  const maxH   = Math.max(...wallets.map(w => w.hScore), 1);
+  const maxZPI = Math.max(...wallets.map(w=>w.zpi), 1);
+  const maxT   = Math.max(...wallets.map(w=>w.tScore), 1);
+  const maxL   = Math.max(...wallets.map(w=>w.lScore), 1);
+  const maxH   = Math.max(...wallets.map(w=>w.hScore), 1);
 
   tbody.innerHTML = "";
   wallets.forEach((w, i) => {
-    const rank = i + 1;
-    const tr   = document.createElement("tr");
+    const rank   = i + 1;
+    const tr     = document.createElement("tr");
     tr.className = rank <= 3 ? "top3" : "";
-
     const volUSD = zltWeiToUSD(w.volume24h);
     const lpUSD  = zltToUSD(w.lpAmountZLT);
     const balZLT = Number(BigInt(w.zltBalance || "0")) / 1e18;
-
-    let cells = "";
+    let cells    = "";
 
     if (tab === "overall") {
-      // Renders zpi (overall score with cap+penalty already baked in by backend)
-      // tScore and lScore shown as context columns; hScore shown via mini bars
       cells = `
         <td>${rankCell(rank)}</td>
-        <td>${walletCell(w, i)}</td>
-        <td>${scoreBar(w.zpi, maxZPI)}${miniScores(w, maxT, maxL, maxH)}</td>
+        <td>${walletCell(w,i)}</td>
+        <td>${scoreBar(w.zpi,maxZPI)}${miniScores(w,maxT,maxL,maxH)}</td>
         <td><div class="zl-mono">${fmtUSD(volUSD)}</div><div class="zl-sub">${w.swapsCount} trades</div></td>
         <td><div class="zl-mono">${fmtUSD(lpUSD)}</div><div class="zl-sub">${fmtZLT(w.lpAmountZLT)}</div></td>
         <td class="r"><div class="zl-mono">${fmtZLT(balZLT)}</div></td>`;
-
     } else if (tab === "trading") {
-      // Uses tScore only — unmodified tab formula
       cells = `
         <td>${rankCell(rank)}</td>
-        <td>${walletCell(w, i)}</td>
+        <td>${walletCell(w,i)}</td>
         <td class="zl-mono">${fmtZLTWei(w.volume24h)}</td>
         <td class="zl-mono">${fmtUSD(volUSD)}</td>
         <td class="zl-mono">${w.swapsCount}</td>
-        <td class="r">${scoreBar(w.tScore, maxT)}</td>`;
-
+        <td class="r">${scoreBar(w.tScore,maxT)}</td>`;
     } else if (tab === "liquidity") {
-      // Uses lScore only — unmodified tab formula
       const lpStatus = w.lpAmountZLT > 0
         ? '<span class="zl-lp-badge active">Active</span>'
         : '<span class="zl-lp-badge none">None</span>';
       cells = `
         <td>${rankCell(rank)}</td>
-        <td>${walletCell(w, i)}</td>
+        <td>${walletCell(w,i)}</td>
         <td class="zl-mono">${fmtZLT(w.lpAmountZLT)}</td>
         <td class="zl-mono">${fmtUSD(lpUSD)}</td>
         <td>${lpStatus}</td>
-        <td class="r">${scoreBar(w.lScore, maxL)}</td>`;
-
+        <td class="r">${scoreBar(w.lScore,maxL)}</td>`;
     } else if (tab === "holding") {
-      // Uses hScore only — unmodified tab formula (no cap/penalty in display)
       cells = `
         <td>${rankCell(rank)}</td>
-        <td>${walletCell(w, i)}</td>
+        <td>${walletCell(w,i)}</td>
         <td class="zl-mono">${fmtZLT(balZLT)}</td>
-        <td class="zl-mono">${w.nftCount} NFT${w.nftCount !== 1 ? "s" : ""}</td>
-        <td class="r">${scoreBar(w.hScore, maxH)}</td>`;
+        <td class="zl-mono">${w.nftCount} NFT${w.nftCount!==1?"s":""}</td>
+        <td class="r">${scoreBar(w.hScore,maxH)}</td>`;
     }
-
     tr.innerHTML = cells;
     tbody.appendChild(tr);
   });
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// TAB SWITCHING — sorts by the correct score field per tab
+// TAB SWITCHING
+// Overall tab: sort by tScore + lScore (trading + liquidity activity only)
+// — excludes passive smart contracts that hold but never trade
 // ─────────────────────────────────────────────────────────────────────────────
 function switchTab(tab) {
   currentTab = tab;
   document.querySelectorAll(".zl-tab").forEach(t =>
     t.classList.toggle("active", t.dataset.tab === tab)
   );
-  // Each tab sorts by its own score; overall sorts by zpi (already backend-sorted)
   const sorted = [...allData].sort((a, b) => {
     if (tab === "trading")   return b.tScore - a.tScore;
     if (tab === "liquidity") return b.lScore - a.lScore;
     if (tab === "holding")   return b.hScore - a.hScore;
-    return b.zpi - a.zpi; // overall
+    // overall: rank by trading vol + LP vol (highest active wallets first)
+    return (b.tScore + b.lScore) - (a.tScore + a.lScore);
   });
   renderTable(sorted, tab);
 }
@@ -539,17 +524,13 @@ document.querySelectorAll(".zl-tab").forEach(btn =>
 // ─────────────────────────────────────────────────────────────────────────────
 async function loadData({ silent = false } = {}) {
   if (document.hidden && silent) return;
-
   const dot = document.getElementById("statusDot");
   const txt = document.getElementById("statusText");
-
   if (!silent) {
     dot.className = "zl-dot";
     txt.innerHTML = '<span class="zl-spinner"></span>Fetching live data from BNB Chain...';
   }
-
   if (retryTimeout) { clearTimeout(retryTimeout); retryTimeout = null; }
-
   try {
     const res = await fetch(API_ENDPOINT);
     if (!res.ok) {
@@ -558,21 +539,17 @@ async function loadData({ silent = false } = {}) {
     }
     const data = await res.json();
 
-    // ZLT price — set globally so fmtUSD helpers work throughout
     zltPriceUSD = data.zltPriceUSD ?? null;
     const priceTag = document.getElementById("priceTag");
     if (zltPriceUSD !== null) {
-      priceTag.className   = "zl-price-tag";
-      priceTag.innerHTML   = `ZLT <span>$${zltPriceUSD.toFixed(8)}</span>`;
+      priceTag.className = "zl-price-tag";
+      priceTag.innerHTML = `ZLT <span>$${zltPriceUSD.toFixed(8)}</span>`;
     } else {
       priceTag.className   = "zl-price-tag unavail";
       priceTag.textContent = "ZLT price unavailable";
     }
 
-    // Leaderboard arrives pre-scored and sorted by overall ZPI from backend
     allData = data.leaderboard || [];
-
-    // Stat cards
     document.getElementById("statWallets").textContent = fmtShort(data.totalWallets || 0) + "+";
     document.getElementById("statNFTs").textContent    = fmtShort(data.nftStaked    || 0);
     const lpZLT = Number(BigInt(data.zltInLP || "0")) / 1e18;
@@ -593,7 +570,7 @@ async function loadData({ silent = false } = {}) {
     document.getElementById("leaderBody").innerHTML =
       `<tr><td colspan="8" class="zl-state-row error">
         ${err.message}<br>
-        <small>Retrying automatically in 30 seconds. Check <strong>/api/leaderboard</strong> if this persists.</small>
+        <small>Retrying automatically in 30 seconds.</small>
       </td></tr>`;
     console.error("[ZPI Leaderboard]", err);
     retryTimeout = setTimeout(() => loadData(), RETRY_DELAY_MS);
@@ -602,7 +579,6 @@ async function loadData({ silent = false } = {}) {
 
 loadData();
 setInterval(() => loadData({ silent: true }), REFRESH_MS);
-
 document.addEventListener("visibilitychange", () => {
   if (!document.hidden && allData.length === 0) loadData();
 });
