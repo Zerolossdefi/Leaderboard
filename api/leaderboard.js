@@ -417,8 +417,10 @@ export default async function handler(req, res) {
       };
     });
 
-    // Sort by overall ZPI descending, keep top 100
-    scored.sort((a, b) => b.zpi - a.zpi);
+    // Sort by trading + liquidity score descending (filters out passive smart
+    // contracts such as routers, vaults and staking contracts that accumulate
+    // ZPI purely from holding but have zero real market activity).
+    scored.sort((a, b) => (b.tScore + b.lScore) - (a.tScore + a.lScore));
     const leaderboard = scored.slice(0, 100);
 
     // ── Phase 5: aggregate stats ─────────────────────────────────────────
