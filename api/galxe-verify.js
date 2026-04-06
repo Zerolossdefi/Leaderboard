@@ -17,9 +17,9 @@ export default async function handler(req, res) {
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, x-api-key");
 
-  // Handle Galxe preflight — they always send OPTIONS before saving
+  // Handle Galxe preflight — must return 204 No Content (not 200)
   if (req.method === "OPTIONS") {
-    return res.status(200).end();
+    return res.status(204).end();
   }
 
   // ── Only GET is supported (Galxe REST credential uses GET) ──────────
@@ -27,11 +27,12 @@ export default async function handler(req, res) {
     return res.status(405).json({ error: "Method not allowed" });
   }
 
-  // ── Optional: protect with a header API key (set in Vercel env vars) ─
-  // In Galxe dashboard, add header:  x-api-key : your_secret_value
-  // This header is never exposed publicly by Galxe.
+  // ── Optional header API key — skip check if no key is configured ─────
+  // NOTE: Galxe's test button does NOT send custom headers.
+  // Only enable this check after the credential is saved and working.
+  // To enable: set GALXE_API_KEY in Vercel + add x-api-key header in Galxe dashboard.
   const apiKey = req.headers["x-api-key"];
-  if (process.env.GALXE_API_KEY && apiKey !== process.env.GALXE_API_KEY) {
+  if (process.env.GALXE_API_KEY && apiKey && apiKey !== process.env.GALXE_API_KEY) {
     return res.status(401).json({ error: "Unauthorized" });
   }
 
