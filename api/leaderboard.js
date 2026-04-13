@@ -4,9 +4,7 @@
 const ZLT_CONTRACT    = "0x05D8762946fA7620b263E1e77003927addf5f7E6";
 const OATNFT_CONTRACT = "0x1d1C02F9fcff7EE2073a72181caE53563C82879C";
 const STAKED_CONTRACT = "0xa40984640D83230EE6Fa1d912E2030f8485b9eFc";
-const LP_ZLT_BNB      = "0xAb168a06623eDe1b6b590733952cca4d7123f1F5"; // ZLT/WBNB PancakeSwap V2
-const LP_BNB_USDT     = "0x16b9a82891338f9bA80E2D6970FddA79D1eb0daE"; // WBNB/USDT PancakeSwap V2
-const WBNB_ADDRESS    = "0xbb4CdB9CBd36B01bD1cBaEBF2De08d9173bc095c";
+const LP_ZLT_USDT     = "0x9aa4073cc0e86508ce18788cdf0e6b6b46677b8d"; // ZLT/USDT PancakeSwap V2
 
 const CHAIN   = "0x38";
 const BNB_RPC = "https://bsc-dataseed.binance.org/";
@@ -97,40 +95,31 @@ async function batchedPromises(items, fn, batchSize = 20) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// ZLT PRICE — derived from on-chain PancakeSwap V2 reserves (zero API cost)
+// ZLT PRICE — derived from on-chain ZLT/USDT PancakeSwap V2 reserves
+// Direct single-hop: ZLT reserve / USDT reserve gives price in USD.
+// USDT has 18 decimals on BSC (same as ZLT), so no decimal adjustment needed.
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchZLTPriceUSD() {
   try {
-    const [t0_zlt, res_zlt, res_bnb_usdt, t0_bnb] = await Promise.all([
-      rpcCall(LP_ZLT_BNB,  "0x0dfe1681"), // token0()
-      rpcCall(LP_ZLT_BNB,  "0x0902f1ac"), // getReserves()
-      rpcCall(LP_BNB_USDT, "0x0902f1ac"), // getReserves()
-      rpcCall(LP_BNB_USDT, "0x0dfe1681"), // token0()
+    const [t0hex, resHex] = await Promise.all([
+      rpcCall(LP_ZLT_USDT, "0x0dfe1681"), // token0()
+      rpcCall(LP_ZLT_USDT, "0x0902f1ac"), // getReserves()
     ]);
 
-    // ZLT/WBNB reserves
-    const raw_zlt = res_zlt.slice(2);
-    const r0_zlt  = BigInt("0x" + raw_zlt.slice(0, 64));
-    const r1_zlt  = BigInt("0x" + raw_zlt.slice(64, 128));
-    const isZLTt0 = ("0x" + t0_zlt.slice(-40)).toLowerCase() === ZLT_CONTRACT.toLowerCase();
-    const resZLT  = isZLTt0 ? r0_zlt : r1_zlt;
-    const resWBNB = isZLTt0 ? r1_zlt : r0_zlt;
+    const isZLTt0 = ("0x" + t0hex.slice(-40)).toLowerCase() === ZLT_CONTRACT.toLowerCase();
+    const raw     = resHex.slice(2);
+    const r0      = BigInt("0x" + raw.slice(0, 64));
+    const r1      = BigInt("0x" + raw.slice(64, 128));
+
+    // resZLT is the ZLT side, resUSDT is the USDT side
+    const resZLT  = isZLTt0 ? r0 : r1;
+    const resUSDT = isZLTt0 ? r1 : r0;
+
     if (resZLT === 0n) throw new Error("ZLT reserve is zero");
 
-    const zltInBNB = Number(resWBNB) / Number(resZLT);
-
-    // WBNB/USDT reserves
-    const isWBNBt0  = ("0x" + t0_bnb.slice(-40)).toLowerCase() === WBNB_ADDRESS.toLowerCase();
-    const raw_bnb   = res_bnb_usdt.slice(2);
-    const r0_bnb    = BigInt("0x" + raw_bnb.slice(0, 64));
-    const r1_bnb    = BigInt("0x" + raw_bnb.slice(64, 128));
-    const resWBNB2  = isWBNBt0 ? r0_bnb : r1_bnb;
-    const resUSDT   = isWBNBt0 ? r1_bnb : r0_bnb;
-    if (resWBNB2 === 0n) throw new Error("WBNB reserve is zero");
-
-    const bnbInUSD    = Number(resUSDT) / Number(resWBNB2);
-    const zltPriceUSD = zltInBNB * bnbInUSD;
-    console.log(`[ZLT Price] BNB=$${bnbInUSD.toFixed(2)}, ZLT=$${zltPriceUSD.toFixed(8)}`);
+    // Price = USDT reserve / ZLT reserve (both 18 decimals → ratio is plain USD)
+    const zltPriceUSD = Number(resUSDT) / Number(resZLT);
+    console.log(`[ZLT Price] $${zltPriceUSD.toFixed(8)} (ZLT/USDT pair)`);
     return zltPriceUSD;
   } catch (err) {
     console.error("[fetchZLTPriceUSD] failed:", err.message);
@@ -199,17 +188,18 @@ async function fetchZLTBalances(addresses) {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // REAL LP POSITIONS  →  Map<address, lpAmountZLT>
-// Reads LP token balance per wallet, computes proportional ZLT share.
+// Reads LP token balance per wallet from the ZLT/USDT pair,
+// computes proportional ZLT share from the pool reserves.
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchLPPositions(addresses, reserveZLT) {
-  const totalSupplyHex = await rpcCall(LP_ZLT_BNB, "0x18160ddd"); // totalSupply()
+  const totalSupplyHex = await rpcCall(LP_ZLT_USDT, "0x18160ddd"); // totalSupply()
   const totalSupply    = BigInt(totalSupplyHex || "0x0");
   if (totalSupply === 0n) return new Map();
 
   const unique  = [...new Set(addresses)];
   const settled = await batchedPromises(unique, async (addr) => {
     const padded   = addr.replace("0x", "").toLowerCase().padStart(64, "0");
-    const result   = await rpcCall(LP_ZLT_BNB, "0x70a08231" + padded);
+    const result   = await rpcCall(LP_ZLT_USDT, "0x70a08231" + padded);
     const lpBal    = BigInt(result || "0x0");
     const zltShare = lpBal > 0n
       ? Number((lpBal * reserveZLT) / totalSupply) / 1e18
@@ -253,12 +243,13 @@ async function fetchTotalStaked() {
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ZLT RESERVE IN LP  (reused for LP position calculation and stat card)
+// Reads from the ZLT/USDT pair.
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchZLTReserveInLP() {
   try {
     const [t0hex, resHex] = await Promise.all([
-      rpcCall(LP_ZLT_BNB, "0x0dfe1681"),
-      rpcCall(LP_ZLT_BNB, "0x0902f1ac"),
+      rpcCall(LP_ZLT_USDT, "0x0dfe1681"),
+      rpcCall(LP_ZLT_USDT, "0x0902f1ac"),
     ]);
     const isZLTt0 = ("0x" + t0hex.slice(-40)).toLowerCase() === ZLT_CONTRACT.toLowerCase();
     const raw     = resHex.slice(2);
