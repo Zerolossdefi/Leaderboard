@@ -4,7 +4,8 @@
 const ZLT_CONTRACT    = "0x05D8762946fA7620b263E1e77003927addf5f7E6";
 const OATNFT_CONTRACT = "0x1d1C02F9fcff7EE2073a72181caE53563C82879C";
 const STAKED_CONTRACT = "0xa40984640D83230EE6Fa1d912E2030f8485b9eFc";
-const LP_ZLT_USDT     = "0x9aa4073cc0e86508ce18788cdf0e6b6b46677b8d"; // ZLT/USDT PancakeSwap V2
+const LP_ZLT_USDT     = "0x9aa4073cc0e86508ce18788cdf0e6b6b46677b8d"; // ZLT/USDT PancakeSwap V2 — used for scoring + stat card
+const LP_ZLT_BNB      = "0xAb168a06623eDe1b6b590733952cca4d7123f1F5"; // ZLT/BNB  PancakeSwap V2 — stat card only (not used for scoring)
 
 const CHAIN   = "0x38";
 const BNB_RPC = "https://bsc-dataseed.binance.org/";
@@ -245,21 +246,38 @@ async function fetchTotalStaked() {
 // ZLT RESERVE IN LP  (reused for LP position calculation and stat card)
 // Reads from the ZLT/USDT pair.
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// ZLT RESERVE IN LP  —  STAT CARD TOTAL (both pairs combined)
+// Returns the sum of ZLT reserves from ZLT/USDT + ZLT/BNB pairs.
+// This is display-only; LP scoring still uses ZLT/USDT only (fetchLPPositions).
+// ─────────────────────────────────────────────────────────────────────────────
 async function fetchZLTReserveInLP() {
-  try {
+  // Helper: extract ZLT reserve from any pair given its address
+  async function getZLTReserve(pairAddr) {
     const [t0hex, resHex] = await Promise.all([
-      rpcCall(LP_ZLT_USDT, "0x0dfe1681"),
-      rpcCall(LP_ZLT_USDT, "0x0902f1ac"),
+      rpcCall(pairAddr, "0x0dfe1681"), // token0()
+      rpcCall(pairAddr, "0x0902f1ac"), // getReserves()
     ]);
     const isZLTt0 = ("0x" + t0hex.slice(-40)).toLowerCase() === ZLT_CONTRACT.toLowerCase();
     const raw     = resHex.slice(2);
     const r0      = BigInt("0x" + raw.slice(0, 64));
     const r1      = BigInt("0x" + raw.slice(64, 128));
     return isZLTt0 ? r0 : r1;
-  } catch(e) {
-    console.warn("fetchZLTReserveInLP failed:", e.message);
-    return 0n;
   }
+
+  // Fetch both pairs in parallel; fall back to 0n if either fails
+  const [resUsdt, resBnb] = await Promise.allSettled([
+    getZLTReserve(LP_ZLT_USDT),
+    getZLTReserve(LP_ZLT_BNB),
+  ]);
+
+  const zltUsdt = resUsdt.status === "fulfilled" ? resUsdt.value : 0n;
+  const zltBnb  = resBnb.status  === "fulfilled" ? resBnb.value  : 0n;
+
+  if (resUsdt.status === "rejected") console.warn("ZLT/USDT reserve failed:", resUsdt.reason?.message);
+  if (resBnb.status  === "rejected") console.warn("ZLT/BNB reserve failed:",  resBnb.reason?.message);
+
+  return zltUsdt + zltBnb; // combined total shown on stat card
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
