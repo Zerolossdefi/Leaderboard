@@ -192,10 +192,29 @@ async function fetchZLTBalances(addresses) {
 // Reads LP token balance per wallet from the ZLT/USDT pair,
 // computes proportional ZLT share from the pool reserves.
 // ─────────────────────────────────────────────────────────────────────────────
-async function fetchLPPositions(addresses, reserveZLT) {
-  const totalSupplyHex = await rpcCall(LP_ZLT_USDT, "0x18160ddd"); // totalSupply()
-  const totalSupply    = BigInt(totalSupplyHex || "0x0");
+// REAL LP POSITIONS  →  Map<address, lpAmountZLT>
+// Reads each wallet's LP token balance from the ZLT/USDT pair and computes
+// their proportional ZLT share from that pair's reserves.
+// NOTE: fetches its own ZLT reserve directly — does NOT use the combined
+// stat-card reserve from fetchZLTReserveInLP(), which includes ZLT/BNB too.
+// ─────────────────────────────────────────────────────────────────────────────
+async function fetchLPPositions(addresses) {
+  // Fetch totalSupply and ZLT/USDT reserves in parallel
+  const [totalSupplyHex, t0hex, resHex] = await Promise.all([
+    rpcCall(LP_ZLT_USDT, "0x18160ddd"), // totalSupply()
+    rpcCall(LP_ZLT_USDT, "0x0dfe1681"), // token0()
+    rpcCall(LP_ZLT_USDT, "0x0902f1ac"), // getReserves()
+  ]);
+
+  const totalSupply = BigInt(totalSupplyHex || "0x0");
   if (totalSupply === 0n) return new Map();
+
+  // Determine which reserve slot is ZLT
+  const isZLTt0    = ("0x" + t0hex.slice(-40)).toLowerCase() === ZLT_CONTRACT.toLowerCase();
+  const raw        = resHex.slice(2);
+  const r0         = BigInt("0x" + raw.slice(0, 64));
+  const r1         = BigInt("0x" + raw.slice(64, 128));
+  const reserveZLT = isZLTt0 ? r0 : r1; // ZLT reserve in ZLT/USDT pair only
 
   const unique  = [...new Set(addresses)];
   const settled = await batchedPromises(unique, async (addr) => {
@@ -395,7 +414,7 @@ export default async function handler(req, res) {
     // ── Phase 3: batched on-chain reads (zero Moralis CU) ────────────────
     const [zltBalances, lpPositions] = await Promise.all([
       fetchZLTBalances(allAddrs),
-      fetchLPPositions(allAddrs, zltReserve),
+      fetchLPPositions(allAddrs),
     ]);
 
     // ── Phase 4: score every wallet ──────────────────────────────────────
