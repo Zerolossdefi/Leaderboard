@@ -410,7 +410,7 @@ async function loadData({ silent=false }={}) {
     if (zltPriceUSD!==null) { priceTag.className="zl-price-tag"; priceTag.innerHTML=`ZLT <span>$${zltPriceUSD.toFixed(8)}</span>`; }
     else { priceTag.className="zl-price-tag unavail"; priceTag.textContent="ZLT price unavailable"; }
     allData=data.leaderboard||[];
-    document.getElementById("statWallets").textContent=fmtShort(data.totalWallets||0)+"+";
+    document.getElementById("statWallets").textContent=fmtShort(data.activeWallets||0)+"+";
     document.getElementById("statNFTs").textContent=fmtShort(data.nftStaked||0);
     const lpZLT=Number(BigInt(data.zltInLP||"0"))/1e18;
     document.getElementById("statLP").textContent=fmtZLT(lpZLT);
