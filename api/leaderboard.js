@@ -429,7 +429,7 @@ async function fetchLPPositions(addresses) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchTotalStaked() {
   try {
-    // getMainPoolInfo() selector: 0x5b9f6f7a
+    // Call getMainPoolInfo() selector: 0x5b9f6f7a
     const result = await rpcCall(STAKED_CONTRACT, "0x5b9f6f7a");
     if (!result || result === "0x") return 0;
 
