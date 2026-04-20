@@ -429,17 +429,23 @@ async function fetchLPPositions(addresses) {
 // ─────────────────────────────────────────────────────────────────────────────
 async function fetchTotalStaked() {
   try {
-    // FIX 8: single deterministic call with verified totalStaked() selector
-    const hex = await rpcCall(STAKED_CONTRACT, "0x817a5e53");
-    if (!hex || hex === "0x") return 0;
-    const n = Number(BigInt(hex));
-    return n > 0 && n < 1_000_000 ? n : 0;
+    // getMainPoolInfo() selector: 0x5b9f6f7a
+    const result = await rpcCall(STAKED_CONTRACT, "0x5b9f6f7a");
+    if (!result || result === "0x") return 0;
+
+    // Decode the second uint256 (total staked NFTs)
+    const raw = result.slice(2); // remove '0x'
+    if (raw.length < 128) return 0;
+    const totalStakedHex = "0x" + raw.slice(64, 128);
+    const n = Number(BigInt(totalStakedHex));
+
+    // Sanity cap (adjust if needed, but 1M is safe for this contract)
+    return (n > 0 && n < 1_000_000) ? n : 0;
   } catch (err) {
-    console.warn("[fetchTotalStaked] failed:", err.message);
+    console.error("[fetchTotalStaked] failed:", err.message);
     return 0;
   }
 }
-
 // ─────────────────────────────────────────────────────────────────────────────
 // ZLT RESERVE IN LP  —  STAT CARD TOTAL (both pairs combined)
 // Returns the sum of ZLT reserves from ZLT/USDT + ZLT/BNB pairs.
