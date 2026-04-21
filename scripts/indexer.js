@@ -10,9 +10,10 @@ const LP_ZLT_USDT = "0x9aa4073cc0e86508ce18788cdf0e6b6b46677b8d";
 const OAT_NFT = "0x1d1C02F9fcff7EE2073a72181caE53563C82879C";
 const SCALE = 10n ** 12n;
 const WEI = 10n ** 18n;
-const BATCH_SIZE = 20; // For parallel RPC calls
+const BATCH_SIZE = 20;
 const RPC_RETRIES = 3;
 const RPC_DELAY_MS = 100;
+const INITIAL_BLOCK = 37000000;
 
 // ======================= CLIENTS =======================
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
@@ -27,7 +28,7 @@ async function moralisFetch(path) {
                 headers: { 'X-API-Key': key }
             });
             if (res.status === 200) return await res.json();
-            if (res.status === 401) continue; // key exhausted
+            if (res.status === 401) continue;
             throw new Error(`Moralis error ${res.status}`);
         } catch (e) { continue; }
     }
@@ -46,7 +47,6 @@ async function rpcWithRetry(fn, args = []) {
 }
 
 async function batchRpcCalls(contract, method, argsList) {
-    // argsList: array of [address] for balanceOf, etc.
     const results = [];
     for (let i = 0; i < argsList.length; i += BATCH_SIZE) {
         const batch = argsList.slice(i, i + BATCH_SIZE);
@@ -66,17 +66,75 @@ async function batchRpcCalls(contract, method, argsList) {
 async function run() {
     console.log("⚡ Starting ZPI v2 Engine (7‑Day Window) – Batch Mode");
 
-    // 1. Get last indexed block
-    const { data: state } = await supabase.from('sync_state').select('*').eq('id', 'main_sync').single();
-    const fromBlock = BigInt(state.last_block_indexed);
-    const toBlock = await rpcWithRetry(() => rpc.getBlockNumber());
+    // ---------- 1. Sync State Fallback ----------
+    let fromBlock = BigInt(INITIAL_BLOCK);
+    const { data: state, error: stateError } = await supabase
+        .from('sync_state')
+        .select('*')
+        .eq('id', 'main_sync')
+        .single();
+    if (stateError || !state) {
+        console.log(`Sync state missing or error: ${stateError?.message}. Using initial block ${INITIAL_BLOCK}`);
+    } else {
+        const storedBlock = state.last_block_indexed;
+        // If stored block is suspiciously high (beyond current chain height), fallback
+        const currentBlock = await rpcWithRetry(() => rpc.getBlockNumber());
+        if (storedBlock > Number(currentBlock) || storedBlock < INITIAL_BLOCK) {
+            console.log(`Stored block ${storedBlock} invalid. Falling back to ${INITIAL_BLOCK}`);
+        } else {
+            fromBlock = BigInt(storedBlock);
+        }
+    }
+    console.log(`From block: ${fromBlock}`);
 
-    // 2. Fetch new transfer logs
-    const logs = await rpcWithRetry(() => rpc.getLogs({
-        address: ZLT,
-        event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)'),
-        fromBlock, toBlock
-    }));
+    // ---------- 2. Determine if we need initial full NFT scan ----------
+    const { count: walletCount, error: countError } = await supabase
+        .from('wallets')
+        .select('*', { count: 'exact', head: true });
+    const isFirstRun = (countError || walletCount === 0);
+    console.log(`Wallets table has ${walletCount} rows. First run: ${isFirstRun}`);
+
+    // ---------- 3. Fetch all OAT NFT holders if first run or daily ----------
+    let nftCountMap = new Map();
+    if (isFirstRun) {
+        console.log("Initial scan: fetching all OAT NFT holders...");
+        const nftData = await moralisFetch(`/nft/${OAT_NFT}/owners?chain=bsc`);
+        for (const nft of nftData.result) {
+            const owner = nft.owner_of.toLowerCase();
+            nftCountMap.set(owner, (nftCountMap.get(owner) || 0) + 1);
+        }
+        console.log(`Found ${nftCountMap.size} unique NFT holders.`);
+    } else {
+        // Still fetch NFT holders (once per run) but only for updates
+        console.log("Fetching OAT NFT holders (incremental)...");
+        const nftData = await moralisFetch(`/nft/${OAT_NFT}/owners?chain=bsc`);
+        for (const nft of nftData.result) {
+            const owner = nft.owner_of.toLowerCase();
+            nftCountMap.set(owner, (nftCountMap.get(owner) || 0) + 1);
+        }
+        console.log(`Found ${nftCountMap.size} unique NFT holders.`);
+    }
+
+    // ---------- 4. Fetch new transfer logs ----------
+    const toBlock = await rpcWithRetry(() => rpc.getBlockNumber());
+    console.log(`Current block: ${toBlock}`);
+    if (toBlock <= fromBlock && !isFirstRun) {
+        console.log("No new blocks and not first run. Exiting.");
+        return;
+    }
+
+    let logs = [];
+    try {
+        logs = await rpcWithRetry(() => rpc.getLogs({
+            address: ZLT,
+            event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)'),
+            fromBlock, toBlock
+        }));
+        console.log(`Found ${logs.length} transfer logs.`);
+    } catch (err) {
+        console.error("Failed to fetch logs:", err);
+        throw err;
+    }
 
     const activeAddrs = new Set();
     const transfers = [];
@@ -89,15 +147,20 @@ async function run() {
             block_number: Number(log.blockNumber)
         });
         activeAddrs.add(from);
-        // Also add 'to' address to update balances later
-        const to = log.args.to.toLowerCase();
-        activeAddrs.add(to);
+        activeAddrs.add(log.args.to.toLowerCase());
+    }
+
+    // Add all NFT holders to activeAddrs (so they get processed even if no transfers)
+    for (const addr of nftCountMap.keys()) {
+        activeAddrs.add(addr);
     }
 
     if (transfers.length > 0) {
-        // Insert new transfer logs
-        await supabase.from('transfer_logs').insert(transfers);
-        // Update swaps_count for wallets that sent transfers
+        const { error: insertError } = await supabase.from('transfer_logs').insert(transfers);
+        if (insertError) throw new Error(`Insert transfer_logs failed: ${insertError.message}`);
+        console.log(`Inserted ${transfers.length} transfer logs.`);
+
+        // Update swaps_count
         const counts = {};
         for (const t of transfers) {
             counts[t.wallet_address] = (counts[t.wallet_address] || 0) + 1;
@@ -107,27 +170,30 @@ async function run() {
         }
     }
 
-    // 3. Clean old transfer logs (> 7 days)
+    // Clean old logs (>7 days)
     const cutoff = new Date(Date.now() - (TRADING_WINDOW_DAYS * 86400000)).toISOString();
     await supabase.from('transfer_logs').delete().lt('created_at', cutoff);
+    console.log("Cleaned old transfer logs.");
 
-        // 4. Compute volume aggregates in batch (SQL)
-    await supabase.rpc('update_all_volumes');
-
-    // 5. Fetch OAT NFT holders once
-    const nftData = await moralisFetch(`/nft/${OAT_NFT}/owners?chain=bsc`);
-    const nftCountMap = new Map();
-    for (const nft of nftData.result) {
-        const owner = nft.owner_of.toLowerCase();
-        nftCountMap.set(owner, (nftCountMap.get(owner) || 0) + 1);
+    // Update volume aggregates (requires SQL function)
+    try {
+        await supabase.rpc('update_all_volumes');
+        console.log("Volume aggregates updated.");
+    } catch (err) {
+        console.error("update_all_volumes RPC failed. Make sure the function exists in Supabase.", err.message);
+        throw err;
     }
 
-    // 6. Get active wallet addresses (those in transfer logs or NFT holders)
-    const allActive = [...activeAddrs];
-    for (const addr of nftCountMap.keys()) allActive.push(addr);
-    const uniqueAddrs = [...new Set(allActive)];
+    // ---------- 5. Collect unique addresses ----------
+    const uniqueAddrs = [...new Set(activeAddrs)];
+    if (uniqueAddrs.length === 0) {
+        console.log("No addresses to process. Exiting.");
+        await supabase.from('sync_state').upsert({ id: 'main_sync', last_block_indexed: Number(toBlock) });
+        return;
+    }
+    console.log(`Total unique addresses to process: ${uniqueAddrs.length}`);
 
-    // 7. Batch fetch ZLT balances, LP balances, and totalSupply
+    // ---------- 6. Batch on-chain data ----------
     const balanceResults = await batchRpcCalls(ZLT, 'balanceOf', uniqueAddrs.map(a => [a]));
     const lpBalanceResults = await batchRpcCalls(LP_ZLT_USDT, 'balanceOf', uniqueAddrs.map(a => [a]));
     const totalSupplyLP = await rpcWithRetry(() => rpc.readContract({
@@ -136,7 +202,6 @@ async function run() {
         functionName: 'totalSupply'
     }));
 
-    // 8. Fetch LP reserves and determine token order
     const reserves = await rpcWithRetry(() => rpc.readContract({
         address: LP_ZLT_USDT,
         abi: [{ name: 'getReserves', type: 'function', outputs: [{ name: 'r0', type: 'uint112' }, { name: 'r1', type: 'uint112' }] }],
@@ -152,7 +217,7 @@ async function run() {
     const reserveUSDT = isZLTFirst ? reserves[1] : reserves[0];
     const priceScaled = (BigInt(reserveUSDT) * SCALE) / BigInt(reserveZLT);
 
-    // 9. Prepare data for upsert
+    // ---------- 7. Compute scores and prepare upsert (with toString conversion) ----------
     const upsertData = [];
     for (let i = 0; i < uniqueAddrs.length; i++) {
         const addr = uniqueAddrs[i];
@@ -160,18 +225,22 @@ async function run() {
         const lpBal = lpBalanceResults[i];
         const lpZLT = totalSupplyLP > 0n ? (BigInt(lpBal) * BigInt(reserveZLT)) / totalSupplyLP : 0n;
 
-        // Get volumes from the wallet table (already updated)
-        const { data: wallet } = await supabase.from('wallets').select('volume_24h_wei, volume_7d_wei, swaps_count').eq('address', addr).single();
-        const vol7d = wallet?.volume_7d_wei || '0';
-        const vol24h = wallet?.volume_24h_wei || '0';
+        // Get volumes from wallets table (they may not exist yet, so default to 0)
+        const { data: wallet } = await supabase
+            .from('wallets')
+            .select('volume_24h_wei, volume_7d_wei, swaps_count')
+            .eq('address', addr)
+            .maybeSingle();
+        const vol7d = wallet?.volume_7d_wei ? BigInt(wallet.volume_7d_wei) : 0n;
+        const vol24h = wallet?.volume_24h_wei ? BigInt(wallet.volume_24h_wei) : 0n;
         const swapsCount = wallet?.swaps_count || 0;
 
-        const tradeUSD_7d = (BigInt(vol7d) * priceScaled) / (WEI * SCALE); // wei * priceScaled / 1e30 = USD (integer)
+        const tradeUSD_7d = (vol7d * priceScaled) / (WEI * SCALE);
         const tScore = 1020n * tradeUSD_7d;
         const lpUSD = (lpZLT * priceScaled) / WEI;
         const lScore = 2030n * lpUSD;
 
-        const tradeUSD_24h = (BigInt(vol24h) * priceScaled) / (WEI * SCALE);
+        const tradeUSD_24h = (vol24h * priceScaled) / (WEI * SCALE);
         const nftCount = nftCountMap.get(addr) || 0;
 
         let hScore = (BigInt(nftCount) * 10000n) + (((bal / WEI) / 100000n) * 3050n);
@@ -184,9 +253,9 @@ async function run() {
             address: addr,
             zlt_balance_wei: bal.toString(),
             lp_amount_zlt: lpZLT.toString(),
-            nft_count: nftCount,
-            volume_7d_wei: vol7d,
-            volume_24h_wei: vol24h,
+            nft_count: Number(nftCount),
+            volume_7d_wei: vol7d.toString(),
+            volume_24h_wei: vol24h.toString(),
             swaps_count: swapsCount,
             zpi_score: Number(zpi),
             t_score: Number(tScore),
@@ -196,16 +265,22 @@ async function run() {
         });
     }
 
-    // 10. Upsert in batches to avoid row limit
+    // ---------- 8. Upsert in batches ----------
     for (let i = 0; i < upsertData.length; i += 100) {
-        await supabase.from('wallets').upsert(upsertData.slice(i, i + 100));
+        const { error: upsertError } = await supabase
+            .from('wallets')
+            .upsert(upsertData.slice(i, i + 100));
+        if (upsertError) throw new Error(`Upsert failed: ${upsertError.message}`);
     }
+    console.log(`Upserted ${upsertData.length} wallets.`);
 
-    // 11. Get top 100 and store in leaderboard_cache
-    const { data: top100 } = await supabase.from('wallets')
+    // ---------- 9. Update leaderboard cache ----------
+    const { data: top100, error: topError } = await supabase
+        .from('wallets')
         .select('address, zpi_score, t_score, l_score, h_score, zlt_balance_wei, lp_amount_zlt, nft_count, volume_24h_wei')
         .order('zpi_score', { ascending: false })
         .limit(100);
+    if (topError) throw new Error(`Failed to fetch top 100: ${topError.message}`);
 
     await supabase.from('leaderboard_cache').upsert({
         id: 1,
@@ -213,10 +288,14 @@ async function run() {
         updated_at: new Date().toISOString()
     });
 
-    // 12. Update sync state
-    await supabase.from('sync_state').update({ last_block_indexed: Number(toBlock) }).eq('id', 'main_sync');
+    // ---------- 10. Update sync state ----------
+    await supabase.from('sync_state').upsert({
+        id: 'main_sync',
+        last_block_indexed: Number(toBlock),
+        last_full_sync: new Date().toISOString()
+    });
 
-    console.log("✅ Season Update Complete.");
+    console.log(`✅ Season Update Complete. Processed ${upsertData.length} wallets. Last block: ${toBlock}`);
 }
 
 run().catch(console.error);
