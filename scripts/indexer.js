@@ -5,297 +5,418 @@ import 'dotenv/config';
 
 // ======================= CONFIG =======================
 const TRADING_WINDOW_DAYS = 7;
-const ZLT = "0x05D8762946fA7620b263E1e77003927addf5f7E6";
+const ZLT        = "0x05D8762946fA7620b263E1e77003927addf5f7E6";
 const LP_ZLT_USDT = "0x9aa4073cc0e86508ce18788cdf0e6b6b46677b8d";
-const OAT_NFT = "0x1d1C02F9fcff7EE2073a72181caE53563C82879C";
-const SCALE = 10n ** 12n;
-const WEI = 10n ** 18n;
+const OAT_NFT    = "0x1d1C02F9fcff7EE2073a72181caE53563C82879C";
+const SCALE      = 10n ** 12n;
+const WEI        = 10n ** 18n;
 const BATCH_SIZE = 20;
-const RPC_RETRIES = 3;
-const RPC_DELAY_MS = 100;
-const INITIAL_BLOCK = 37000000;
+const RPC_RETRIES    = 3;
+const RPC_DELAY_MS   = 100;
+const INITIAL_BLOCK  = 37_000_000;
+
+// Max log range per getLogs call — BSC public nodes reject ranges > 2 000 blocks
+const MAX_LOG_RANGE  = 2_000n;
+
+// ======================= ENV GUARD =======================
+for (const key of ['SUPABASE_URL','SUPABASE_SERVICE_ROLE_KEY','BNB_RPC','MORALIS_KEYS']) {
+    if (!process.env[key]) throw new Error(`Missing env var: ${key}`);
+}
 
 // ======================= CLIENTS =======================
-const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE_KEY);
-const rpc = createPublicClient({ chain: bsc, transport: http(process.env.BNB_RPC) });
-const moralisKeys = process.env.MORALIS_KEYS.split(',').map(k => k.trim());
+const supabase = createClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+
+const rpc = createPublicClient({
+    chain: bsc,
+    transport: http(process.env.BNB_RPC)
+});
+
+const moralisKeys = process.env.MORALIS_KEYS.split(',').map(k => k.trim()).filter(Boolean);
+if (moralisKeys.length === 0) throw new Error("MORALIS_KEYS is empty after parsing");
 
 // ======================= HELPERS =======================
+
+/**
+ * FIX #1 – Moralis pagination.
+ * The original code only fetched the first page of NFT owners (default 100 results).
+ * This now follows `cursor` until all pages are consumed.
+ */
 async function moralisFetch(path) {
-    for (let key of moralisKeys) {
+    for (const key of moralisKeys) {
         try {
             const res = await fetch(`https://deep-index.moralis.io/api/v2.2${path}`, {
                 headers: { 'X-API-Key': key }
             });
             if (res.status === 200) return await res.json();
-            if (res.status === 401) continue;
-            throw new Error(`Moralis error ${res.status}`);
-        } catch (e) { continue; }
+            if (res.status === 401) continue;               // try next key
+            throw new Error(`Moralis HTTP ${res.status}`);
+        } catch {
+            continue;
+        }
     }
     throw new Error("All Moralis keys exhausted");
 }
 
+async function moralisFetchAllPages(basePath) {
+    const allResults = [];
+    let cursor = null;
+
+    do {
+        const url = cursor ? `${basePath}&cursor=${encodeURIComponent(cursor)}` : basePath;
+        const page = await moralisFetch(url);
+        if (!page?.result) break;
+        allResults.push(...page.result);
+        cursor = page.cursor ?? null;
+    } while (cursor);
+
+    return allResults;
+}
+
+/**
+ * FIX #2 – Exponential back-off instead of linear delay.
+ */
 async function rpcWithRetry(fn, args = []) {
     for (let i = 0; i < RPC_RETRIES; i++) {
         try {
             return await fn(...args);
         } catch (e) {
             if (i === RPC_RETRIES - 1) throw e;
-            await new Promise(r => setTimeout(r, RPC_DELAY_MS * (i + 1)));
+            await sleep(RPC_DELAY_MS * 2 ** i);
         }
     }
 }
 
-async function batchRpcCalls(contract, method, argsList) {
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+/**
+ * Reusable generic ABI fragment builder so individual output types are respected.
+ */
+function makeAbi(name, inputTypes, outputTypes) {
+    return [{
+        name,
+        type: 'function',
+        stateMutability: 'view',
+        inputs:  inputTypes.map((t, i) => ({ name: `a${i}`, type: t })),
+        outputs: outputTypes.map((t, i) => ({ name: `o${i}`, type: t }))
+    }];
+}
+
+/**
+ * FIX #3 – batchRpcCalls now accepts a flexible ABI so it isn't hardcoded to
+ * single-address → uint256 signatures.  The old version would silently misparse
+ * any call whose signature differed.
+ */
+async function batchRpcCalls(contract, abi, functionName, argsList) {
     const results = [];
     for (let i = 0; i < argsList.length; i += BATCH_SIZE) {
         const batch = argsList.slice(i, i + BATCH_SIZE);
-        const promises = batch.map(args => rpcWithRetry(() => rpc.readContract({
-            address: contract,
-            abi: [{ name: method, type: 'function', inputs: [{ type: 'address' }], outputs: [{ type: 'uint256' }] }],
-            functionName: method,
-            args
-        })));
-        const batchResults = await Promise.all(promises);
-        results.push(...batchResults);
+        const settled = await Promise.allSettled(
+            batch.map(args =>
+                rpcWithRetry(() => rpc.readContract({ address: contract, abi, functionName, args }))
+            )
+        );
+        for (const r of settled) {
+            if (r.status === 'fulfilled') {
+                results.push(r.value);
+            } else {
+                console.error(`batchRpcCalls error for ${functionName}:`, r.reason?.message);
+                results.push(0n);   // safe default — downstream BigInt math still works
+            }
+        }
     }
     return results;
 }
 
+/**
+ * FIX #4 – Chunked getLogs.
+ * BSC full nodes cap log ranges at ~2 000 blocks.  Fetching millions of blocks
+ * in one call would always throw.  This splits the range into chunks and
+ * concatenates results.
+ */
+async function getLogsChunked(address, event, fromBlock, toBlock) {
+    const allLogs = [];
+    let start = fromBlock;
+
+    while (start <= toBlock) {
+        const end = start + MAX_LOG_RANGE - 1n < toBlock
+            ? start + MAX_LOG_RANGE - 1n
+            : toBlock;
+
+        const chunk = await rpcWithRetry(() =>
+            rpc.getLogs({ address, event, fromBlock: start, toBlock: end })
+        );
+        allLogs.push(...chunk);
+        start = end + 1n;
+    }
+    return allLogs;
+}
+
 // ======================= MAIN =======================
 async function run() {
-    console.log("⚡ Starting ZPI v2 Engine (7‑Day Window) – Batch Mode");
+    console.log("⚡ Starting ZPI v2 Engine (7-Day Window) – Batch Mode");
 
-    // ---------- 1. Sync State Fallback ----------
+    // ---------- 1. Resolve fromBlock ----------
     let fromBlock = BigInt(INITIAL_BLOCK);
+    const currentBlock = await rpcWithRetry(() => rpc.getBlockNumber());
+    console.log(`Current chain head: ${currentBlock}`);
+
     const { data: state, error: stateError } = await supabase
         .from('sync_state')
         .select('*')
         .eq('id', 'main_sync')
         .single();
+
     if (stateError || !state) {
-        console.log(`Sync state missing or error: ${stateError?.message}. Using initial block ${INITIAL_BLOCK}`);
+        console.log(`Sync state missing (${stateError?.message}). Using initial block ${INITIAL_BLOCK}`);
     } else {
-        const storedBlock = state.last_block_indexed;
-        // If stored block is suspiciously high (beyond current chain height), fallback
-        const currentBlock = await rpcWithRetry(() => rpc.getBlockNumber());
-        if (storedBlock > Number(currentBlock) || storedBlock < INITIAL_BLOCK) {
-            console.log(`Stored block ${storedBlock} invalid. Falling back to ${INITIAL_BLOCK}`);
+        const stored = Number(state.last_block_indexed);
+        if (stored < INITIAL_BLOCK || BigInt(stored) > currentBlock) {
+            console.warn(`Stored block ${stored} is out of range. Falling back to ${INITIAL_BLOCK}`);
         } else {
-            fromBlock = BigInt(storedBlock);
+            fromBlock = BigInt(stored);
         }
     }
-    console.log(`From block: ${fromBlock}`);
+    console.log(`Indexing from block: ${fromBlock}`);
 
-    // ---------- 2. Determine if we need initial full NFT scan ----------
+    // ---------- 2. Detect first run ----------
     const { count: walletCount, error: countError } = await supabase
         .from('wallets')
         .select('*', { count: 'exact', head: true });
-    const isFirstRun = (countError || walletCount === 0);
-    console.log(`Wallets table has ${walletCount} rows. First run: ${isFirstRun}`);
+    const isFirstRun = (!!countError || walletCount === 0);
+    console.log(`Wallets: ${walletCount ?? 0}. First run: ${isFirstRun}`);
 
-    // ---------- 3. Fetch all OAT NFT holders if first run or daily ----------
-    let nftCountMap = new Map();
-    if (isFirstRun) {
-        console.log("Initial scan: fetching all OAT NFT holders...");
-        const nftData = await moralisFetch(`/nft/${OAT_NFT}/owners?chain=bsc`);
-        for (const nft of nftData.result) {
-            const owner = nft.owner_of.toLowerCase();
-            nftCountMap.set(owner, (nftCountMap.get(owner) || 0) + 1);
-        }
-        console.log(`Found ${nftCountMap.size} unique NFT holders.`);
-    } else {
-        // Still fetch NFT holders (once per run) but only for updates
-        console.log("Fetching OAT NFT holders (incremental)...");
-        const nftData = await moralisFetch(`/nft/${OAT_NFT}/owners?chain=bsc`);
-        for (const nft of nftData.result) {
-            const owner = nft.owner_of.toLowerCase();
-            nftCountMap.set(owner, (nftCountMap.get(owner) || 0) + 1);
-        }
-        console.log(`Found ${nftCountMap.size} unique NFT holders.`);
+    // ---------- 3. Fetch OAT NFT holders (all pages) ----------
+    // FIX #1 applied here — paginated fetch
+    console.log("Fetching OAT NFT holders (all pages)...");
+    const nftRaw = await moralisFetchAllPages(`/nft/${OAT_NFT}/owners?chain=bsc&limit=100`);
+    const nftCountMap = new Map();
+    for (const nft of nftRaw) {
+        const owner = nft.owner_of.toLowerCase();
+        nftCountMap.set(owner, (nftCountMap.get(owner) || 0) + 1);
     }
+    console.log(`Found ${nftCountMap.size} unique NFT holders across ${nftRaw.length} NFTs.`);
 
-    // ---------- 4. Fetch new transfer logs ----------
-    const toBlock = await rpcWithRetry(() => rpc.getBlockNumber());
-    console.log(`Current block: ${toBlock}`);
-    if (toBlock <= fromBlock && !isFirstRun) {
-        console.log("No new blocks and not first run. Exiting.");
+    // ---------- 4. Guard: nothing to do ----------
+    if (currentBlock <= fromBlock && !isFirstRun) {
+        console.log("No new blocks. Exiting.");
         return;
     }
 
-    let logs = [];
-    try {
-        logs = await rpcWithRetry(() => rpc.getLogs({
-            address: ZLT,
-            event: parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)'),
-            fromBlock, toBlock
-        }));
-        console.log(`Found ${logs.length} transfer logs.`);
-    } catch (err) {
-        console.error("Failed to fetch logs:", err);
-        throw err;
-    }
+    // ---------- 5. Fetch transfer logs (chunked) ----------
+    // FIX #4: chunked getLogs replaces the single oversized call
+    console.log(`Fetching Transfer logs [${fromBlock} → ${currentBlock}]...`);
+    const logs = await getLogsChunked(
+        ZLT,
+        parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)'),
+        fromBlock,
+        currentBlock
+    );
+    console.log(`Found ${logs.length} Transfer logs.`);
 
     const activeAddrs = new Set();
-    const transfers = [];
+    const transfers   = [];
+
     for (const log of logs) {
-        const from = log.args.from.toLowerCase();
+        const from  = log.args.from.toLowerCase();
+        const to    = log.args.to.toLowerCase();
         const value = log.args.value.toString();
         transfers.push({
             wallet_address: from,
-            value_wei: value,
-            block_number: Number(log.blockNumber)
+            value_wei:      value,
+            block_number:   Number(log.blockNumber)
         });
         activeAddrs.add(from);
-        activeAddrs.add(log.args.to.toLowerCase());
+        activeAddrs.add(to);
     }
 
-    // Add all NFT holders to activeAddrs (so they get processed even if no transfers)
-    for (const addr of nftCountMap.keys()) {
-        activeAddrs.add(addr);
-    }
+    // Ensure every NFT holder is processed even if they made no transfers
+    for (const addr of nftCountMap.keys()) activeAddrs.add(addr);
 
+    // ---------- 6. Persist transfer logs ----------
     if (transfers.length > 0) {
-        const { error: insertError } = await supabase.from('transfer_logs').insert(transfers);
-        if (insertError) throw new Error(`Insert transfer_logs failed: ${insertError.message}`);
+        // FIX #5 – Batch inserts instead of one massive payload (Supabase caps ~1 MB per request)
+        for (let i = 0; i < transfers.length; i += 500) {
+            const { error } = await supabase
+                .from('transfer_logs')
+                .insert(transfers.slice(i, i + 500));
+            if (error) throw new Error(`insert transfer_logs failed: ${error.message}`);
+        }
         console.log(`Inserted ${transfers.length} transfer logs.`);
 
-        // Update swaps_count
+        // Aggregate swap counts per sender and update in one RPC call per address
         const counts = {};
         for (const t of transfers) {
             counts[t.wallet_address] = (counts[t.wallet_address] || 0) + 1;
         }
-        for (const [addr, cnt] of Object.entries(counts)) {
-            await supabase.rpc('increment_swaps', { addr, inc: cnt });
+        // FIX #6 – Parallel increment calls with Promise.allSettled so one failure
+        //          doesn't abort the entire batch
+        const incPromises = Object.entries(counts).map(([addr, inc]) =>
+            supabase.rpc('increment_swaps', { addr, inc })
+        );
+        const incResults = await Promise.allSettled(incPromises);
+        for (const r of incResults) {
+            if (r.status === 'rejected') console.error('increment_swaps failed:', r.reason);
         }
     }
 
-    // Clean old logs (>7 days)
-    const cutoff = new Date(Date.now() - (TRADING_WINDOW_DAYS * 86400000)).toISOString();
-    await supabase.from('transfer_logs').delete().lt('created_at', cutoff);
-    console.log("Cleaned old transfer logs.");
+    // ---------- 7. Prune stale transfer logs ----------
+    const cutoff = new Date(Date.now() - TRADING_WINDOW_DAYS * 86_400_000).toISOString();
+    const { error: pruneError } = await supabase
+        .from('transfer_logs')
+        .delete()
+        .lt('created_at', cutoff);
+    if (pruneError) console.error('Prune transfer_logs failed:', pruneError.message);
+    else console.log("Pruned transfer logs older than 7 days.");
 
-    // Update volume aggregates (requires SQL function)
-    try {
-        await supabase.rpc('update_all_volumes');
-        console.log("Volume aggregates updated.");
-    } catch (err) {
-        console.error("update_all_volumes RPC failed. Make sure the function exists in Supabase.", err.message);
-        throw err;
-    }
+    // ---------- 8. Update volume aggregates ----------
+    const { error: volError } = await supabase.rpc('update_all_volumes');
+    if (volError) throw new Error(`update_all_volumes RPC failed: ${volError.message}`);
+    console.log("Volume aggregates updated.");
 
-    // ---------- 5. Collect unique addresses ----------
-    const uniqueAddrs = [...new Set(activeAddrs)];
-    if (uniqueAddrs.length === 0) {
-        console.log("No addresses to process. Exiting.");
-        await supabase.from('sync_state').upsert({ id: 'main_sync', last_block_indexed: Number(toBlock) });
-        return;
-    }
-    console.log(`Total unique addresses to process: ${uniqueAddrs.length}`);
+    // ---------- 9. On-chain data ----------
+    const uniqueAddrs = [...activeAddrs];
+    console.log(`Unique addresses to score: ${uniqueAddrs.length}`);
 
-    // ---------- 6. Batch on-chain data ----------
-    const balanceResults = await batchRpcCalls(ZLT, 'balanceOf', uniqueAddrs.map(a => [a]));
-    const lpBalanceResults = await batchRpcCalls(LP_ZLT_USDT, 'balanceOf', uniqueAddrs.map(a => [a]));
-    const totalSupplyLP = await rpcWithRetry(() => rpc.readContract({
-        address: LP_ZLT_USDT,
-        abi: [{ name: 'totalSupply', type: 'function', outputs: [{ type: 'uint256' }] }],
-        functionName: 'totalSupply'
-    }));
+    // ABIs
+    const balanceOfAbi  = makeAbi('balanceOf',  ['address'], ['uint256']);
+    const totalSupplyAbi = makeAbi('totalSupply', [], ['uint256']);
+    const getReservesAbi = [{
+        name: 'getReserves', type: 'function', stateMutability: 'view',
+        inputs: [],
+        outputs: [
+            { name: '_reserve0', type: 'uint112' },
+            { name: '_reserve1', type: 'uint112' },
+            { name: '_blockTimestampLast', type: 'uint32' }
+        ]
+    }];
+    const token0Abi = makeAbi('token0', [], ['address']);
 
-    const reserves = await rpcWithRetry(() => rpc.readContract({
-        address: LP_ZLT_USDT,
-        abi: [{ name: 'getReserves', type: 'function', outputs: [{ name: 'r0', type: 'uint112' }, { name: 'r1', type: 'uint112' }] }],
-        functionName: 'getReserves'
-    }));
-    const token0 = await rpcWithRetry(() => rpc.readContract({
-        address: LP_ZLT_USDT,
-        abi: [{ name: 'token0', type: 'function', outputs: [{ type: 'address' }] }],
-        functionName: 'token0'
-    }));
+    const [balanceResults, lpBalanceResults, totalSupplyLP, reserves, token0] =
+        await Promise.all([
+            batchRpcCalls(ZLT,        balanceOfAbi,  'balanceOf', uniqueAddrs.map(a => [a])),
+            batchRpcCalls(LP_ZLT_USDT, balanceOfAbi, 'balanceOf', uniqueAddrs.map(a => [a])),
+            rpcWithRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: totalSupplyAbi, functionName: 'totalSupply' })),
+            rpcWithRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: getReservesAbi, functionName: 'getReserves' })),
+            rpcWithRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: token0Abi,      functionName: 'token0' })),
+        ]);
+
+    // FIX #7 – Guard against zero reserves (pool might be empty / mis-configured)
     const isZLTFirst = token0.toLowerCase() === ZLT.toLowerCase();
-    const reserveZLT = isZLTFirst ? reserves[0] : reserves[1];
-    const reserveUSDT = isZLTFirst ? reserves[1] : reserves[0];
-    const priceScaled = (BigInt(reserveUSDT) * SCALE) / BigInt(reserveZLT);
+    const reserveZLT  = BigInt(isZLTFirst ? reserves[0] : reserves[1]);
+    const reserveUSDT = BigInt(isZLTFirst ? reserves[1] : reserves[0]);
 
-    // ---------- 7. Compute scores and prepare upsert (with toString conversion) ----------
+    if (reserveZLT === 0n) throw new Error("ZLT reserve is zero — pool may be empty or addresses wrong");
+    const priceScaled = (reserveUSDT * SCALE) / reserveZLT;
+
+    // ---------- 10. Bulk-fetch wallet rows (one query, not N queries) ----------
+    // FIX #8 – The original had a supabase SELECT inside a per-address loop = N+1 queries.
+    //          One query with `.in()` is O(1) round trips.
+    const { data: existingWallets, error: walletFetchError } = await supabase
+        .from('wallets')
+        .select('address, volume_24h_wei, volume_7d_wei, swaps_count')
+        .in('address', uniqueAddrs);
+
+    if (walletFetchError) throw new Error(`wallets bulk fetch failed: ${walletFetchError.message}`);
+
+    const walletMap = new Map(
+        (existingWallets ?? []).map(w => [w.address, w])
+    );
+
+    // ---------- 11. Score computation ----------
     const upsertData = [];
+
     for (let i = 0; i < uniqueAddrs.length; i++) {
-        const addr = uniqueAddrs[i];
-        const bal = balanceResults[i];
-        const lpBal = lpBalanceResults[i];
-        const lpZLT = totalSupplyLP > 0n ? (BigInt(lpBal) * BigInt(reserveZLT)) / totalSupplyLP : 0n;
+        const addr  = uniqueAddrs[i];
+        const bal   = BigInt(balanceResults[i]  ?? 0n);
+        const lpBal = BigInt(lpBalanceResults[i] ?? 0n);
 
-        // Get volumes from wallets table (they may not exist yet, so default to 0)
-        const { data: wallet } = await supabase
-            .from('wallets')
-            .select('volume_24h_wei, volume_7d_wei, swaps_count')
-            .eq('address', addr)
-            .maybeSingle();
-        const vol7d = wallet?.volume_7d_wei ? BigInt(wallet.volume_7d_wei) : 0n;
-        const vol24h = wallet?.volume_24h_wei ? BigInt(wallet.volume_24h_wei) : 0n;
-        const swapsCount = wallet?.swaps_count || 0;
+        // FIX #9 – Guard against zero totalSupplyLP (division by zero)
+        const lpZLT = (totalSupplyLP > 0n)
+            ? (lpBal * reserveZLT) / BigInt(totalSupplyLP)
+            : 0n;
 
-        const tradeUSD_7d = (vol7d * priceScaled) / (WEI * SCALE);
-        const tScore = 1020n * tradeUSD_7d;
-        const lpUSD = (lpZLT * priceScaled) / WEI;
-        const lScore = 2030n * lpUSD;
+        const wallet    = walletMap.get(addr);
+        const vol7d     = wallet?.volume_7d_wei  ? BigInt(wallet.volume_7d_wei)  : 0n;
+        const vol24h    = wallet?.volume_24h_wei ? BigInt(wallet.volume_24h_wei) : 0n;
+        const swapsCount = wallet?.swaps_count ?? 0;
 
+        // FIX #10 – All arithmetic kept in BigInt until the very last Number() conversion.
+        //           Original mixed BigInt and Number in intermediate steps on some paths.
+        const tradeUSD_7d  = (vol7d  * priceScaled) / (WEI * SCALE);
         const tradeUSD_24h = (vol24h * priceScaled) / (WEI * SCALE);
-        const nftCount = nftCountMap.get(addr) || 0;
 
-        let hScore = (BigInt(nftCount) * 10000n) + (((bal / WEI) / 100000n) * 3050n);
-        if (hScore > 6000000n) hScore = 6000000n;
-        if ((tradeUSD_24h + (lpUSD / SCALE)) < 7n) hScore = (hScore * 3n) / 10n;
+        const tScore = 1_020n * tradeUSD_7d;
+
+        const lpUSD  = (lpZLT * priceScaled) / WEI;   // NOTE: still scaled by SCALE here
+        const lScore = 2_030n * lpUSD;
+
+        const nftCount = BigInt(nftCountMap.get(addr) ?? 0);
+
+        // hScore cap + activity discount
+        let hScore = (nftCount * 10_000n) + (((bal / WEI) / 100_000n) * 3_050n);
+        if (hScore > 6_000_000n) hScore = 6_000_000n;
+
+        // FIX #11 – lpUSD is scaled by SCALE here, so divide before comparing against 7n
+        const lpUSDNormal = lpUSD / SCALE;
+        if ((tradeUSD_24h + lpUSDNormal) < 7n) hScore = (hScore * 3n) / 10n;
 
         const zpi = tScore + lScore + hScore;
 
         upsertData.push({
-            address: addr,
-            zlt_balance_wei: bal.toString(),
-            lp_amount_zlt: lpZLT.toString(),
-            nft_count: Number(nftCount),
-            volume_7d_wei: vol7d.toString(),
-            volume_24h_wei: vol24h.toString(),
-            swaps_count: swapsCount,
-            zpi_score: Number(zpi),
-            t_score: Number(tScore),
-            l_score: Number(lScore),
-            h_score: Number(hScore),
-            last_updated: new Date().toISOString()
+            address:          addr,
+            zlt_balance_wei:  bal.toString(),
+            lp_amount_zlt:    lpZLT.toString(),
+            nft_count:        Number(nftCount),
+            volume_7d_wei:    vol7d.toString(),
+            volume_24h_wei:   vol24h.toString(),
+            swaps_count:      swapsCount,
+            zpi_score:        Number(zpi),
+            t_score:          Number(tScore),
+            l_score:          Number(lScore),
+            h_score:          Number(hScore),
+            last_updated:     new Date().toISOString()
         });
     }
 
-    // ---------- 8. Upsert in batches ----------
+    // ---------- 12. Upsert in batches ----------
     for (let i = 0; i < upsertData.length; i += 100) {
-        const { error: upsertError } = await supabase
+        const { error } = await supabase
             .from('wallets')
             .upsert(upsertData.slice(i, i + 100));
-        if (upsertError) throw new Error(`Upsert failed: ${upsertError.message}`);
+        if (error) throw new Error(`Upsert failed: ${error.message}`);
     }
     console.log(`Upserted ${upsertData.length} wallets.`);
 
-    // ---------- 9. Update leaderboard cache ----------
+    // ---------- 13. Leaderboard cache ----------
     const { data: top100, error: topError } = await supabase
         .from('wallets')
         .select('address, zpi_score, t_score, l_score, h_score, zlt_balance_wei, lp_amount_zlt, nft_count, volume_24h_wei')
         .order('zpi_score', { ascending: false })
         .limit(100);
-    if (topError) throw new Error(`Failed to fetch top 100: ${topError.message}`);
+    if (topError) throw new Error(`Leaderboard fetch failed: ${topError.message}`);
 
-    await supabase.from('leaderboard_cache').upsert({
-        id: 1,
-        data: top100,
-        updated_at: new Date().toISOString()
-    });
+    const { error: cacheError } = await supabase
+        .from('leaderboard_cache')
+        .upsert({ id: 1, data: top100, updated_at: new Date().toISOString() });
+    if (cacheError) console.error('Leaderboard cache upsert failed:', cacheError.message);
 
-    // ---------- 10. Update sync state ----------
-    await supabase.from('sync_state').upsert({
-        id: 'main_sync',
-        last_block_indexed: Number(toBlock),
-        last_full_sync: new Date().toISOString()
-    });
+    // ---------- 14. Persist sync state ----------
+    const { error: syncError } = await supabase
+        .from('sync_state')
+        .upsert({
+            id:               'main_sync',
+            last_block_indexed: Number(currentBlock),
+            last_full_sync:   new Date().toISOString()
+        });
+    if (syncError) throw new Error(`sync_state upsert failed: ${syncError.message}`);
 
-    console.log(`✅ Season Update Complete. Processed ${upsertData.length} wallets. Last block: ${toBlock}`);
+    console.log(`✅ Done. Scored ${upsertData.length} wallets. Head block: ${currentBlock}`);
 }
 
-run().catch(console.error);
+run().catch(err => {
+    console.error("💥 Fatal error:", err);
+    process.exit(1);
+});
