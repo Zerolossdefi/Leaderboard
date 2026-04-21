@@ -13,7 +13,7 @@ const WEI        = 10n ** 18n;
 const BATCH_SIZE = 20;
 const RPC_RETRIES    = 3;
 const RPC_DELAY_MS   = 100;
-const INITIAL_BLOCK  = 37_000_000;
+const INITIAL_BLOCK = 93_715_000;
 
 // Max log range per getLogs call — BSC public nodes reject ranges > 2 000 blocks
 const MAX_LOG_RANGE  = 2_000n;
