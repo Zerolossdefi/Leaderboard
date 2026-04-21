@@ -16,7 +16,7 @@ const RPC_DELAY_MS   = 100;
 const INITIAL_BLOCK = 93_715_000;
 
 // Max log range per getLogs call — BSC public nodes reject ranges > 2 000 blocks
-const MAX_LOG_RANGE  = 2_000n;
+const MAX_LOG_RANGE = 500n;
 
 // ======================= ENV GUARD =======================
 for (const key of ['SUPABASE_URL','SUPABASE_SERVICE_ROLE_KEY','BNB_RPC','MORALIS_KEYS']) {
@@ -150,6 +150,7 @@ async function getLogsChunked(address, event, fromBlock, toBlock) {
         );
         allLogs.push(...chunk);
         start = end + 1n;
+        await sleep(200);
     }
     return allLogs;
 }
