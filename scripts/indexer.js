@@ -220,14 +220,16 @@ async function run() {
     const transfers   = [];
 
     for (const log of logs) {
-        const from  = log.args.from.toLowerCase();
-        const to    = log.args.to.toLowerCase();
-        const value = log.args.value.toString();
-        transfers.push({
-            wallet_address: from,
-            value_wei:      value,
-            block_number:   Number(log.blockNumber)
-        });
+    const from  = log.args.from.toLowerCase();
+    const to    = log.args.to.toLowerCase();
+    const value = log.args.value.toString();
+    transfers.push({
+        wallet_address: from,
+        value_wei:      value,
+        block_number:   Number(log.blockNumber),
+        tx_hash:        log.transactionHash.toLowerCase(),
+        log_index:      Number(log.logIndex)
+    });
         activeAddrs.add(from);
         activeAddrs.add(to);
     }
