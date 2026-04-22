@@ -1,10 +1,10 @@
 // =============================================================================
 // ZPI Indexer – scripts/indexer.js
-// $0 infrastructure: ANKR RPC + Moralis NFT + Supabase
+// $0 infrastructure: dRPC + Lava Network RPC + Moralis NFT + Supabase
 // =============================================================================
 
 import { createClient }                        from '@supabase/supabase-js';
-import { createPublicClient, http, parseAbiItem } from 'viem';
+import { createPublicClient, custom, parseAbiItem } from 'viem';
 import { bsc }                                 from 'viem/chains';
 import 'dotenv/config';
 
@@ -18,7 +18,7 @@ const OAT_NFT      = '0x1d1C02F9fcff7EE2073a72181caE53563C82879C';
 const SCALE        = 10n ** 12n;   // price precision scaler
 const WEI          = 10n ** 18n;   // 1 ether in wei
 
-const MAX_LOG_RANGE   = 2_000n;    // blocks per getLogs chunk (safe for ANKR)
+const MAX_LOG_RANGE   = 2_000n;    // blocks per getLogs chunk
 const RPC_BATCH_SIZE  = 20;        // parallel readContract calls per batch
 const DB_BATCH_SIZE   = 100;       // rows per supabase upsert
 const LOG_BATCH_SIZE  = 500;       // rows per transfer_logs insert
@@ -28,7 +28,7 @@ const CHUNK_DELAY_MS  = 150;       // delay between getLogs chunks
 
 // How far back to start on first run (7 days of BSC blocks @ ~3s/block)
 // Updated dynamically at runtime; this is just a safety fallback
-const INITIAL_LOOKBACK_BLOCKS = 201_600n;  // 7 days
+const LOOKBACK_BLOCKS = 201_600n;  // 7 days
 
 // Score weights (integer math only — no floats anywhere)
 const W_TRADE  = 1_020n;
@@ -45,7 +45,8 @@ const REQUIRED_ENVS = [
     'SUPABASE_URL',
     'SUPABASE_SERVICE_ROLE_KEY',
     'MORALIS_KEYS',
-    'ANKR_RPC_URL',
+    'DRPC_URL',
+    'LAVA_URL',
 ];
 for (const key of REQUIRED_ENVS) {
     if (!process.env[key]?.trim()) {
@@ -53,11 +54,14 @@ for (const key of REQUIRED_ENVS) {
     }
 }
 
-const ANKR_RPC_URL = process.env.ANKR_RPC_URL.trim();
-const ANKR_API_KEY = process.env.ANKR_API_KEY?.trim() || null;
-const moralisKeys  = process.env.MORALIS_KEYS.split(',').map(k => k.trim()).filter(Boolean);
-
+const moralisKeys = process.env.MORALIS_KEYS.split(',').map(k => k.trim()).filter(Boolean);
 if (moralisKeys.length === 0) throw new Error('MORALIS_KEYS is empty after parsing');
+
+// RPC endpoints — dRPC primary, Lava Network fallback
+const RPC_URLS = [
+    process.env.DRPC_URL.trim(),   // e.g. https://lb.drpc.org/ogrpc?network=bsc&dkey=YOUR_KEY
+    process.env.LAVA_URL.trim(),   // e.g. https://bsc.lava.build/YOUR_KEY
+];
 
 // =============================================================================
 // CLIENTS
@@ -67,14 +71,40 @@ const supabase = createClient(
     process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// ANKR transport — adds X-API-Key header if key is provided
-const ankrTransport = http(ANKR_RPC_URL, {
-    headers: ANKR_API_KEY ? { 'X-API-Key': ANKR_API_KEY } : undefined,
-});
+// Custom transport — tries dRPC first, falls back to Lava Network automatically.
+// Works as a drop-in for viem's createPublicClient so all existing
+// withRetry(() => rpc.readContract(...)) calls stay unchanged.
+let rpcIndex = 0;
+
+function customTransport(urls) {
+    return custom({
+        async request({ method, params }) {
+            // Try each URL once before giving up
+            for (let attempt = 0; attempt < urls.length; attempt++) {
+                const url = urls[rpcIndex];
+                try {
+                    const res = await fetch(url, {
+                        method:  'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body:    JSON.stringify({ jsonrpc: '2.0', method, params, id: 1 }),
+                    });
+                    if (!res.ok) throw new Error(`HTTP ${res.status}`);
+                    const json = await res.json();
+                    if (json.error) throw new Error(json.error.message);
+                    return json.result;
+                } catch (err) {
+                    console.warn(`[rpc] ${url} failed: ${err.message} — switching endpoint`);
+                    rpcIndex = (rpcIndex + 1) % urls.length;
+                }
+            }
+            throw new Error('All RPC endpoints failed');
+        },
+    });
+}
 
 const rpc = createPublicClient({
     chain: bsc,
-    transport: ankrTransport,
+    transport: customTransport(RPC_URLS),
 });
 
 // =============================================================================
@@ -318,8 +348,8 @@ function computeScores({ vol7d, vol24h, lpZLT, bal, nftCount, priceScaled, total
 
 async function run() {
     console.log('⚡ ZPI Indexer starting...');
-    console.log(`   ANKR RPC : ${ANKR_RPC_URL}`);
-    console.log(`   API Key  : ${ANKR_API_KEY ? 'provided' : 'none'}`);
+    console.log(`   dRPC URL : ${process.env.DRPC_URL}`);
+    console.log(`   Lava URL : ${process.env.LAVA_URL}`);
     console.log(`   Moralis  : ${moralisKeys.length} key(s)`);
 
     // -------------------------------------------------------------------------
@@ -329,7 +359,7 @@ async function run() {
     console.log(`[chain] Head block: ${currentBlock}`);
 
     // Compute the 7-day lookback as the minimum sensible start
-    const sevenDayBlock = currentBlock - INITIAL_LOOKBACK_BLOCKS;
+    const sevenDayBlock = currentBlock - LOOKBACK_BLOCKS;
 
     let fromBlock = sevenDayBlock;  // default: 7 days ago
 
