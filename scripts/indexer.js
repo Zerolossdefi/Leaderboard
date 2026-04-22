@@ -19,13 +19,17 @@ const SCALE        = 10n ** 12n;   // price precision scaler
 const WEI          = 10n ** 18n;   // 1 ether in wei
 
 const MAX_LOG_RANGE   = 2_000n;    // blocks per getLogs chunk
-const RPC_BATCH_SIZE  = 5;         // parallel readContract calls per batch (reduced to avoid 429)
+const RPC_BATCH_SIZE  = 2;         // parallel readContract calls per batch (low to avoid 429)
 const DB_BATCH_SIZE   = 100;       // rows per supabase upsert
 const LOG_BATCH_SIZE  = 500;       // rows per transfer_logs insert
 const RPC_RETRIES     = 4;         // max retries per RPC call
 const RPC_DELAY_MS    = 300;       // base delay for exponential backoff
-const CHUNK_DELAY_MS  = 150;       // delay between getLogs chunks
-const BATCH_DELAY_MS  = 300;       // delay between each batchRead batch
+const CHUNK_DELAY_MS  = 500;       // delay between getLogs chunks
+const BATCH_DELAY_MS  = 800;       // delay between each batchRead batch
+const RPC_TIMEOUT_MS  = 30_000;    // per-request RPC timeout (ms)
+const DB_TIMEOUT_MS   = 30_000;    // per-request Supabase timeout (ms)
+const ADDR_CHUNK      = 100;       // addresses per Supabase .in() query
+const DB_RETRIES      = 3;         // max retries for Supabase calls
 
 // How far back to start on first run (7 days of BSC blocks @ ~3s/block)
 // Updated dynamically at runtime; this is just a safety fallback
@@ -84,11 +88,20 @@ function customTransport(urls) {
             for (let attempt = 0; attempt < urls.length; attempt++) {
                 const url = urls[rpcIndex];
                 try {
-                    const res = await fetch(url, {
-                        method:  'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body:    JSON.stringify({ jsonrpc: '2.0', method, params, id: 1 }),
-                    });
+                    // Abort after RPC_TIMEOUT_MS to prevent silent hangs
+                    const controller = new AbortController();
+                    const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
+                    let res;
+                    try {
+                        res = await fetch(url, {
+                            method:  'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body:    JSON.stringify({ jsonrpc: '2.0', method, params, id: 1 }),
+                            signal:  controller.signal,
+                        });
+                    } finally {
+                        clearTimeout(timer);
+                    }
                     if (!res.ok) throw new Error(`HTTP ${res.status}`);
                     const json = await res.json();
                     if (json.error) throw new Error(json.error.message);
@@ -129,6 +142,34 @@ async function withRetry(fn, label = 'rpc') {
             if (isLast) throw err;
             const delay = RPC_DELAY_MS * 2 ** attempt;
             console.warn(`[retry] ${label} failed (attempt ${attempt + 1}/${RPC_RETRIES}), retrying in ${delay}ms — ${err.message}`);
+            await sleep(delay);
+        }
+    }
+}
+
+/**
+ * Supabase query retry wrapper with timeout + exponential backoff.
+ * Wraps any supabase call that returns { data, error }.
+ * Throws on final failure so callers can decide how to handle it.
+ */
+async function supabaseWithRetry(fn, label = 'db') {
+    for (let attempt = 0; attempt < DB_RETRIES; attempt++) {
+        try {
+            // Race the supabase call against a timeout
+            const result = await Promise.race([
+                fn(),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error(`Supabase timeout after ${DB_TIMEOUT_MS}ms`)), DB_TIMEOUT_MS)
+                ),
+            ]);
+            // Supabase returns { data, error } — surface errors as thrown exceptions
+            if (result?.error) throw new Error(result.error.message);
+            return result;
+        } catch (err) {
+            const isLast = attempt === DB_RETRIES - 1;
+            if (isLast) throw err;
+            const delay = RPC_DELAY_MS * 2 ** attempt;
+            console.warn(`[db-retry] ${label} failed (attempt ${attempt + 1}/${DB_RETRIES}), retrying in ${delay}ms — ${err.message}`);
             await sleep(delay);
         }
     }
@@ -480,12 +521,11 @@ async function run() {
 
     const addrArgs = uniqueAddrs.map(a => [a]);
 
-    const [zltBalances, lpBalances, totalSupplyLP, priceScaled] = await Promise.all([
-        batchRead(ZLT,         ABI.balanceOf, 'balanceOf', addrArgs),
-        batchRead(LP_ZLT_USDT, ABI.balanceOf, 'balanceOf', addrArgs),
-        withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.totalSupply, functionName: 'totalSupply' }), 'totalSupply').then(BigInt),
-        getZLTPriceScaled(),
-    ]);
+    // Run sequentially (not Promise.all) to avoid doubling RPC rate limit pressure
+    const zltBalances  = await batchRead(ZLT,         ABI.balanceOf, 'balanceOf', addrArgs);
+    const lpBalances   = await batchRead(LP_ZLT_USDT, ABI.balanceOf, 'balanceOf', addrArgs);
+    const totalSupplyLP = BigInt(await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.totalSupply, functionName: 'totalSupply' }), 'totalSupply'));
+    const priceScaled  = await getZLTPriceScaled();
 
     // Need reserveZLT to compute lpZLT per wallet
     const reserves   = await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.getReserves, functionName: 'getReserves' }), 'getReserves');
@@ -496,18 +536,19 @@ async function run() {
     console.log(`[chain] ZLT price (scaled): ${priceScaled}, LP totalSupply: ${totalSupplyLP}`);
 
     // -------------------------------------------------------------------------
-    // 9. Bulk-fetch current wallet rows (volumes, swaps) — chunked to avoid Supabase URL limit
+    // 9. Bulk-fetch current wallet rows (volumes, swaps) — chunked + retried
     // -------------------------------------------------------------------------
     const existingWallets = [];
-    const ADDR_CHUNK = 500;
     for (let i = 0; i < uniqueAddrs.length; i += ADDR_CHUNK) {
         const chunk = uniqueAddrs.slice(i, i + ADDR_CHUNK);
-        const { data, error: walletFetchErr } = await supabase
-            .from('wallets')
-            .select('address, volume_24h_wei, volume_7d_wei, swaps_count')
-            .in('address', chunk);
-        if (walletFetchErr) throw new Error(`wallets bulk fetch failed: ${walletFetchErr.message}`);
-        if (data) existingWallets.push(...data);
+        const result = await supabaseWithRetry(
+            () => supabase
+                .from('wallets')
+                .select('address, volume_24h_wei, volume_7d_wei, swaps_count')
+                .in('address', chunk),
+            `wallets fetch chunk ${Math.floor(i / ADDR_CHUNK) + 1}`
+        );
+        if (result?.data) existingWallets.push(...result.data);
     }
 
     const walletMap = new Map(
