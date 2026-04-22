@@ -1,12 +1,13 @@
 {
-  "name": "zpi-indexer",
+  "name": "zpi-leaderboard",
   "version": "1.0.0",
   "type": "module",
-  "description": "Zeroloss Performance Index Engine",
-  "main": "scripts/indexer.js",
+  "scripts": {
+    "start": "node scripts/indexer.js"
+  },
   "dependencies": {
-    "@supabase/supabase-js": "^2.39.0",
-    "viem": "^2.7.0",
-    "dotenv": "^16.4.0"
+    "@supabase/supabase-js": "^2.0.0",
+    "viem": "^2.0.0",
+    "dotenv": "^16.0.0"
   }
 }
