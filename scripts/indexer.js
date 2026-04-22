@@ -19,12 +19,13 @@ const SCALE        = 10n ** 12n;   // price precision scaler
 const WEI          = 10n ** 18n;   // 1 ether in wei
 
 const MAX_LOG_RANGE   = 2_000n;    // blocks per getLogs chunk
-const RPC_BATCH_SIZE  = 20;        // parallel readContract calls per batch
+const RPC_BATCH_SIZE  = 5;         // parallel readContract calls per batch (reduced to avoid 429)
 const DB_BATCH_SIZE   = 100;       // rows per supabase upsert
 const LOG_BATCH_SIZE  = 500;       // rows per transfer_logs insert
 const RPC_RETRIES     = 4;         // max retries per RPC call
 const RPC_DELAY_MS    = 300;       // base delay for exponential backoff
 const CHUNK_DELAY_MS  = 150;       // delay between getLogs chunks
+const BATCH_DELAY_MS  = 300;       // delay between each batchRead batch
 
 // How far back to start on first run (7 days of BSC blocks @ ~3s/block)
 // Updated dynamically at runtime; this is just a safety fallback
@@ -185,6 +186,10 @@ async function batchRead(contract, abi, functionName, argsList) {
                 results.push(0n);
             }
         }
+        await sleep(BATCH_DELAY_MS); // rate-limit protection between batches
+    }
+    return results;
+}
     }
     return results;
 }
@@ -494,14 +499,19 @@ async function run() {
     console.log(`[chain] ZLT price (scaled): ${priceScaled}, LP totalSupply: ${totalSupplyLP}`);
 
     // -------------------------------------------------------------------------
-    // 9. Bulk-fetch current wallet rows (volumes, swaps) — single query
+    // 9. Bulk-fetch current wallet rows (volumes, swaps) — chunked to avoid Supabase URL limit
     // -------------------------------------------------------------------------
-    const { data: existingWallets, error: walletFetchErr } = await supabase
-        .from('wallets')
-        .select('address, volume_24h_wei, volume_7d_wei, swaps_count')
-        .in('address', uniqueAddrs);
-
-    if (walletFetchErr) throw new Error(`wallets bulk fetch failed: ${walletFetchErr.message}`);
+    const existingWallets = [];
+    const ADDR_CHUNK = 500;
+    for (let i = 0; i < uniqueAddrs.length; i += ADDR_CHUNK) {
+        const chunk = uniqueAddrs.slice(i, i + ADDR_CHUNK);
+        const { data, error: walletFetchErr } = await supabase
+            .from('wallets')
+            .select('address, volume_24h_wei, volume_7d_wei, swaps_count')
+            .in('address', chunk);
+        if (walletFetchErr) throw new Error(`wallets bulk fetch failed: ${walletFetchErr.message}`);
+        if (data) existingWallets.push(...data);
+    }
 
     const walletMap = new Map(
         (existingWallets ?? []).map(w => [w.address, w])
