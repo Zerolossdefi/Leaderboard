@@ -22,13 +22,13 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
       - name: Run indexer
         env:
           SUPABASE_URL:              ${{ secrets.SUPABASE_URL }}
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
           MORALIS_KEYS:              ${{ secrets.MORALIS_KEYS }}
-          ANKR_RPC_URL:              ${{ secrets.ANKR_RPC_URL }}
-          ANKR_API_KEY:              ${{ secrets.ANKR_API_KEY }}
+          DRPC_URL:                  ${{ secrets.DRPC_URL }}
+          LAVA_URL:                  ${{ secrets.LAVA_URL }}
         run: node scripts/indexer.js
