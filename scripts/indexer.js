@@ -190,7 +190,6 @@ async function batchRead(contract, abi, functionName, argsList) {
     }
     return results;
 }
-    }
     return results;
 }
 
