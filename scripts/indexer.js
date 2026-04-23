@@ -13,7 +13,8 @@ import 'dotenv/config';
 // =============================================================================
 const ZLT          = '0x05D8762946fA7620b263E1e77003927addf5f7E6';
 const LP_ZLT_USDT  = '0x9aa4073cc0e86508ce18788cdf0e6b6b46677b8d';
-const OAT_NFT      = '0x1d1C02F9fcff7EE2073a72181caE53563C82879C';
+const LP_ZLT_BNB   = '0xab168a06623ede1b6b590733952cca4d7123f1f5';
+const NFT_STAKING  = '0xa40984640D83230EE6Fa1d912E2030f8485b9eFc';
 
 const SCALE        = 10n ** 12n;   // price precision scaler
 const WEI          = 10n ** 18n;   // 1 ether in wei
@@ -432,7 +433,7 @@ async function run() {
     // -------------------------------------------------------------------------
     // 2. Fetch NFT holders (Moralis, paginated)
     // -------------------------------------------------------------------------
-    const nftOwners = await fetchNFTOwners(OAT_NFT);
+    const nftOwners = await fetchNFTOwners(NFT_STAKING);
 
     // -------------------------------------------------------------------------
     // 3. Fetch Transfer logs (chunked getLogs via ANKR)
@@ -524,16 +525,23 @@ async function run() {
     // Run sequentially (not Promise.all) to avoid doubling RPC rate limit pressure
     const zltBalances  = await batchRead(ZLT,         ABI.balanceOf, 'balanceOf', addrArgs);
     const lpBalances   = await batchRead(LP_ZLT_USDT, ABI.balanceOf, 'balanceOf', addrArgs);
-    const totalSupplyLP = BigInt(await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.totalSupply, functionName: 'totalSupply' }), 'totalSupply'));
+    const lpBnbBalances = await batchRead(LP_ZLT_BNB, ABI.balanceOf, 'balanceOf', addrArgs);
+    const totalSupplyLP     = BigInt(await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.totalSupply, functionName: 'totalSupply' }), 'totalSupply'));
+    const totalSupplyLPBnb  = BigInt(await withRetry(() => rpc.readContract({ address: LP_ZLT_BNB,  abi: ABI.totalSupply, functionName: 'totalSupply' }), 'totalSupplyBnb'));
     const priceScaled  = await getZLTPriceScaled();
 
-    // Need reserveZLT to compute lpZLT per wallet
+    // Need reserveZLT to compute lpZLT per wallet — fetch from both pools
     const reserves   = await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.getReserves, functionName: 'getReserves' }), 'getReserves');
     const token0Addr = await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.token0, functionName: 'token0' }), 'token0');
     const isZLTFirst = token0Addr.toLowerCase() === ZLT.toLowerCase();
     const reserveZLT = BigInt(isZLTFirst ? reserves[0] : reserves[1]);
 
-    console.log(`[chain] ZLT price (scaled): ${priceScaled}, LP totalSupply: ${totalSupplyLP}`);
+    const reservesBnb   = await withRetry(() => rpc.readContract({ address: LP_ZLT_BNB, abi: ABI.getReserves, functionName: 'getReserves' }), 'getReservesBnb');
+    const token0BnbAddr = await withRetry(() => rpc.readContract({ address: LP_ZLT_BNB, abi: ABI.token0, functionName: 'token0' }), 'token0Bnb');
+    const isZLTFirstBnb  = token0BnbAddr.toLowerCase() === ZLT.toLowerCase();
+    const reserveZLTBnb  = BigInt(isZLTFirstBnb ? reservesBnb[0] : reservesBnb[1]);
+
+    console.log(`[chain] ZLT price (scaled): ${priceScaled}, LP USDT totalSupply: ${totalSupplyLP}, LP BNB totalSupply: ${totalSupplyLPBnb}`);
 
     // -------------------------------------------------------------------------
     // 9. Bulk-fetch current wallet rows (volumes, swaps) — chunked + retried
@@ -565,9 +573,12 @@ async function run() {
         const bal   = zltBalances[i];
         const lpBal = lpBalances[i];
 
-        const lpZLT = totalSupplyLP > 0n
+        const lpZLT = (totalSupplyLP > 0n
             ? (lpBal * reserveZLT) / totalSupplyLP
-            : 0n;
+            : 0n)
+            + (totalSupplyLPBnb > 0n
+            ? (lpBnbBalances[i] * reserveZLTBnb) / totalSupplyLPBnb
+            : 0n);
 
         const stored   = walletMap.get(addr);
         const vol7d    = stored?.volume_7d_wei  ? BigInt(stored.volume_7d_wei)  : 0n;
@@ -619,16 +630,37 @@ async function run() {
     if (topErr) throw new Error(`leaderboard fetch failed: ${topErr.message}`);
 
     // Compute summary stats for the API response
-    const totalWallets = upsertRows.length;
-    const totalTxns    = transfers.length;
-    const nftStaked    = [...nftOwners.values()].reduce((a, b) => a + b, 0);
-    const zltInLP      = reserveZLT.toString();
+
+    // Fix 2: Cumulative transfer count from transfer_logs (not just this run)
+    const { count: totalTxns, error: txnCountErr } = await supabase
+        .from('transfer_logs')
+        .select('*', { count: 'exact', head: true });
+    if (txnCountErr) console.error('[db] transfer_logs count failed:', txnCountErr.message);
+
+    // Fix 2 & 3: Active wallets = wallets holding ZLT or an NFT (or both)
+    const activeWalletSet = new Set();
+    for (let i = 0; i < uniqueAddrs.length; i++) {
+        const addr = uniqueAddrs[i];
+        const hasBal = zltBalances[i] > 0n;
+        const hasNFT = nftOwners.has(addr);
+        if (hasBal || hasNFT) activeWalletSet.add(addr);
+    }
+    const totalWallets = activeWalletSet.size;
+
+    // Fix 3: Unique NFT holder count (not total NFT count)
+    const nftStaked = nftOwners.size;
+
+    // Fix 4: ZLT in LP = sum of ZLT reserves from both pools
+    const zltInLP = (reserveZLT + reserveZLTBnb).toString();
+
+    // Fix 1: Expose ZLT price in USD for the frontend
+    const zltPriceUSD = Number(priceScaled) / Number(SCALE);
 
     const { error: cacheErr } = await supabase
         .from('leaderboard_cache')
         .upsert({
             id:         1,
-            data:       { top100, totalWallets, totalTxns, nftStaked, zltInLP },
+            data:       { top100, totalWallets, totalTxns: totalTxns ?? 0, nftStaked, zltInLP, zltPriceUSD },
             updated_at: new Date().toISOString(),
         });
     if (cacheErr) console.error('[db] leaderboard_cache upsert failed:', cacheErr.message);
