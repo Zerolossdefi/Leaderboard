@@ -409,8 +409,23 @@ async function loadData({ silent=false }={}) {
     const priceTag=document.getElementById("priceTag");
     if (zltPriceUSD!==null) { priceTag.className="zl-price-tag"; priceTag.innerHTML=`ZLT <span>$${zltPriceUSD.toFixed(8)}</span>`; }
     else { priceTag.className="zl-price-tag unavail"; priceTag.textContent="ZLT price unavailable"; }
-    allData=data.leaderboard||[];
-    document.getElementById("statWallets").textContent=fmtShort(data.activeWallets||0)+"+";
+
+    // Map API snake_case field names → camelCase expected by renderTable
+    allData=(data.leaderboard||[]).map(w=>({
+      address:      w.address,
+      zpi:          Number(w.zpi_score   || 0),
+      tScore:       Number(w.t_score     || 0),
+      lScore:       Number(w.l_score     || 0),
+      hScore:       Number(w.h_score     || 0),
+      zltBalance:   String(w.zlt_balance_wei || "0"),
+      lpAmountZLT:  Number(w.lp_amount_zlt  || 0) / 1e18,
+      volume24h:    String(w.volume_24h_wei  || "0"),
+      volume7d:     String(w.volume_7d_wei   || "0"),
+      nftCount:     Number(w.nft_count    || 0),
+      swapsCount:   Number(w.swaps_count  || 0),
+    }));
+
+    document.getElementById("statWallets").textContent=fmtShort(data.totalWallets||0)+"+";
     document.getElementById("statNFTs").textContent=fmtShort(data.nftStaked||0);
     const lpZLT=Number(BigInt(data.zltInLP||"0"))/1e18;
     document.getElementById("statLP").textContent=fmtZLT(lpZLT);
