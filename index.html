@@ -302,7 +302,7 @@
 <script>
 const API_ENDPOINT   = "/api/leaderboard";
 const RETRY_DELAY_MS = 30000;
-const REFRESH_MS     = 14400000;
+const REFRESH_MS = 7200000; // 2 hours
 const AVATARS = ["#D8B740","#3B82F6","#22C55E","#A855F7","#EC4899","#10B981","#F59E0B","#6366F1","#EF4444","#14B8A6"];
 const SEASON_START = new Date(Date.UTC(2026, 3, 6, 0, 0, 0));
 const SEASON_END   = new Date(Date.UTC(2026, 4, 6, 23, 59, 59));
@@ -410,7 +410,7 @@ function switchTab(tab) {
     if(tab==="trading")   return b.tScore-a.tScore;
     if(tab==="liquidity") return b.lScore-a.lScore;
     if(tab==="holding")   return b.hScore-a.hScore;
-    return (b.tScore+b.lScore)-(a.tScore+a.lScore);
+    return b.zpi-a.zpi;
   });
   renderTable(sorted,tab);
 }
