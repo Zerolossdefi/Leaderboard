@@ -310,13 +310,14 @@ const SEASON_END   = new Date(Date.UTC(2026, 4, 6, 23, 59, 59));
 let allData = [], currentTab = "overall", retryTimeout = null, zltPriceUSD = null;
 
 const pad = n => String(n).padStart(2, "0");
+function safeBigInt(v) { if(v===null||v===undefined) return 0n; try { const s=String(v); if(s.includes(".")||s.toLowerCase().includes("e")) return BigInt(Math.round(Number(s))); return BigInt(s); } catch(e) { return 0n; } }
 function fmtShort(n) { if (n>=1e6) return (n/1e6).toFixed(1)+"M"; if (n>=1e3) return (n/1e3).toFixed(1)+"K"; return String(Math.round(n)); }
-function fmtZLTWei(w) { const n=Number(BigInt(w||"0"))/1e18; if(n>=1e6) return (n/1e6).toFixed(2)+"M ZLT"; if(n>=1e3) return (n/1e3).toFixed(1)+"K ZLT"; return n.toFixed(0)+" ZLT"; }
+function fmtZLTWei(w) { const n=Number(safeBigInt(w))/1e18; if(n>=1e6) return (n/1e6).toFixed(2)+"M ZLT"; if(n>=1e3) return (n/1e3).toFixed(1)+"K ZLT"; return n.toFixed(0)+" ZLT"; }
 function fmtZLT(n) { if(n>=1e6) return (n/1e6).toFixed(2)+"M ZLT"; if(n>=1e3) return (n/1e3).toFixed(1)+"K ZLT"; return Math.round(n)+" ZLT"; }
 function fmtUSD(n) { if(n===null||n===undefined||isNaN(n)) return "\u2014"; if(n>=1e9) return "$"+(n/1e9).toFixed(2)+"B"; if(n>=1e6) return "$"+(n/1e6).toFixed(2)+"M"; if(n>=1e3) return "$"+(n/1e3).toFixed(1)+"K"; return "$"+n.toFixed(2); }
 function fmtScore(n) { if(n>=1e6) return (n/1e6).toFixed(2)+"M"; if(n>=1e3) return (n/1e3).toFixed(1)+"K"; return Math.round(n).toLocaleString(); }
 function fmtAddr(a) { return a.slice(0,6)+"\u2026"+a.slice(-4); }
-function zltWeiToUSD(w) { if(!zltPriceUSD) return null; return (Number(BigInt(w||"0"))/1e18)*zltPriceUSD; }
+function zltWeiToUSD(w) { if(!zltPriceUSD) return null; return (Number(safeBigInt(w))/1e18)*zltPriceUSD; }
 function zltToUSD(n) { if(!zltPriceUSD) return null; return n*zltPriceUSD; }
 
 const HEADERS = {
@@ -366,7 +367,7 @@ function renderTable(wallets, tab) {
   wallets.forEach((w,i) => {
     const rank=i+1, tr=document.createElement("tr");
     tr.className=rank<=3?"top3":"";
-    const volUSD=zltWeiToUSD(w.volume24h), lpUSD=zltToUSD(w.lpAmountZLT), balZLT=Number(BigInt(w.zltBalance||"0"))/1e18;
+    const volUSD=zltWeiToUSD(w.volume24h), lpUSD=zltToUSD(w.lpAmountZLT), balZLT=Number(safeBigInt(w.zltBalance))/1e18;
     let cells="";
     if (tab==="overall") {
       cells=`<td>${rankCell(rank)}</td><td>${walletCell(w,i)}</td><td>${scoreBar(w.zpi,maxZPI)}${miniScores(w,maxT,maxL,maxH)}</td><td><div class="zl-mono">${fmtUSD(volUSD)}</div><div class="zl-sub">${w.swapsCount} trades</div></td><td><div class="zl-mono">${fmtUSD(lpUSD)}</div><div class="zl-sub">${fmtZLT(w.lpAmountZLT)}</div></td><td class="r"><div class="zl-mono">${fmtZLT(balZLT)}</div></td>`;
@@ -409,25 +410,10 @@ async function loadData({ silent=false }={}) {
     const priceTag=document.getElementById("priceTag");
     if (zltPriceUSD!==null) { priceTag.className="zl-price-tag"; priceTag.innerHTML=`ZLT <span>$${zltPriceUSD.toFixed(8)}</span>`; }
     else { priceTag.className="zl-price-tag unavail"; priceTag.textContent="ZLT price unavailable"; }
-
-    // Map API snake_case field names → camelCase expected by renderTable
-    allData=(data.leaderboard||[]).map(w=>({
-      address:      w.address,
-      zpi:          Number(w.zpi_score   || 0),
-      tScore:       Number(w.t_score     || 0),
-      lScore:       Number(w.l_score     || 0),
-      hScore:       Number(w.h_score     || 0),
-      zltBalance:   String(w.zlt_balance_wei || "0"),
-      lpAmountZLT:  Number(w.lp_amount_zlt  || 0) / 1e18,
-      volume24h:    String(w.volume_24h_wei  || "0"),
-      volume7d:     String(w.volume_7d_wei   || "0"),
-      nftCount:     Number(w.nft_count    || 0),
-      swapsCount:   Number(w.swaps_count  || 0),
-    }));
-
-    document.getElementById("statWallets").textContent=fmtShort(data.totalWallets||0)+"+";
+    allData=data.leaderboard||[];
+    document.getElementById("statWallets").textContent=fmtShort(data.activeWallets||0)+"+";
     document.getElementById("statNFTs").textContent=fmtShort(data.nftStaked||0);
-    const lpZLT=Number(BigInt(data.zltInLP||"0"))/1e18;
+    const lpZLT=Number(safeBigInt(data.zltInLP))/1e18;
     document.getElementById("statLP").textContent=fmtZLT(lpZLT);
     document.getElementById("statTxns").textContent=fmtShort(data.totalTxns||0);
     switchTab(currentTab);
