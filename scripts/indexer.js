@@ -33,7 +33,6 @@ const ADDR_CHUNK      = 100;       // addresses per Supabase .in() query
 const DB_RETRIES      = 3;         // max retries for Supabase calls
 
 // How far back to start on first run (7 days of BSC blocks @ ~3s/block)
-// Updated dynamically at runtime; this is just a safety fallback
 const LOOKBACK_BLOCKS = 201_600n;  // 7 days
 
 // Score weights (integer math only — no floats anywhere)
@@ -65,8 +64,8 @@ if (moralisKeys.length === 0) throw new Error('MORALIS_KEYS is empty after parsi
 
 // RPC endpoints — dRPC primary, Lava Network fallback
 const RPC_URLS = [
-    process.env.DRPC_URL.trim(),   // e.g. https://lb.drpc.org/ogrpc?network=bsc&dkey=YOUR_KEY
-    process.env.LAVA_URL.trim(),   // e.g. https://bsc.lava.build/YOUR_KEY
+    process.env.DRPC_URL.trim(),
+    process.env.LAVA_URL.trim(),
 ];
 
 // =============================================================================
@@ -77,19 +76,14 @@ const supabase = createClient(
     process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// Custom transport — tries dRPC first, falls back to Lava Network automatically.
-// Works as a drop-in for viem's createPublicClient so all existing
-// withRetry(() => rpc.readContract(...)) calls stay unchanged.
 let rpcIndex = 0;
 
 function customTransport(urls) {
     return custom({
         async request({ method, params }) {
-            // Try each URL once before giving up
             for (let attempt = 0; attempt < urls.length; attempt++) {
                 const url = urls[rpcIndex];
                 try {
-                    // Abort after RPC_TIMEOUT_MS to prevent silent hangs
                     const controller = new AbortController();
                     const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
                     let res;
@@ -130,10 +124,6 @@ function sleep(ms) {
     return new Promise(r => setTimeout(r, ms));
 }
 
-/**
- * Retry wrapper with exponential backoff.
- * Handles transient RPC failures gracefully.
- */
 async function withRetry(fn, label = 'rpc') {
     for (let attempt = 0; attempt < RPC_RETRIES; attempt++) {
         try {
@@ -148,22 +138,15 @@ async function withRetry(fn, label = 'rpc') {
     }
 }
 
-/**
- * Supabase query retry wrapper with timeout + exponential backoff.
- * Wraps any supabase call that returns { data, error }.
- * Throws on final failure so callers can decide how to handle it.
- */
 async function supabaseWithRetry(fn, label = 'db') {
     for (let attempt = 0; attempt < DB_RETRIES; attempt++) {
         try {
-            // Race the supabase call against a timeout
             const result = await Promise.race([
                 fn(),
                 new Promise((_, reject) =>
                     setTimeout(() => reject(new Error(`Supabase timeout after ${DB_TIMEOUT_MS}ms`)), DB_TIMEOUT_MS)
                 ),
             ]);
-            // Supabase returns { data, error } — surface errors as thrown exceptions
             if (result?.error) throw new Error(result.error.message);
             return result;
         } catch (err) {
@@ -176,9 +159,6 @@ async function supabaseWithRetry(fn, label = 'db') {
     }
 }
 
-/**
- * Build minimal ABI fragments for readContract calls.
- */
 function makeAbi(name, inputs, outputs) {
     return [{
         name,
@@ -189,7 +169,6 @@ function makeAbi(name, inputs, outputs) {
     }];
 }
 
-// Pre-built ABIs
 const ABI = {
     balanceOf:   makeAbi('balanceOf',   ['address'], ['uint256']),
     totalSupply: makeAbi('totalSupply', [],           ['uint256']),
@@ -205,10 +184,6 @@ const ABI = {
     }],
 };
 
-/**
- * Batch readContract calls with concurrency control.
- * Returns 0n for any individual call that fails (safe for BigInt math).
- */
 async function batchRead(contract, abi, functionName, argsList) {
     const results = [];
     for (let i = 0; i < argsList.length; i += RPC_BATCH_SIZE) {
@@ -222,13 +197,13 @@ async function batchRead(contract, abi, functionName, argsList) {
             )
         );
         for (const r of settled) {
-        if (r.status === 'fulfilled') results.push(BigInt(r.value));
-        else {
-            console.error(`[batchRead] ${functionName} failed for args ${JSON.stringify(args)}:`, r.reason?.message);
-            results.push(0n);
-    }
-}
-        await sleep(BATCH_DELAY_MS); // rate-limit protection between batches
+            if (r.status === 'fulfilled') results.push(BigInt(r.value));
+            else {
+                console.error(`[batchRead] ${functionName} failed for args ${JSON.stringify(args)}:`, r.reason?.message);
+                results.push(0n);
+            }
+        }
+        await sleep(BATCH_DELAY_MS);
     }
     return results;
 }
@@ -237,10 +212,6 @@ async function batchRead(contract, abi, functionName, argsList) {
 // MORALIS – NFT OWNER FETCH (PAGINATED)
 // =============================================================================
 
-/**
- * Rotates through up to 3 Moralis API keys.
- * Throws only if ALL keys fail for the same request.
- */
 async function moralisFetch(path) {
     for (const key of moralisKeys) {
         try {
@@ -257,10 +228,6 @@ async function moralisFetch(path) {
     throw new Error('All Moralis keys exhausted');
 }
 
-/**
- * Fetches ALL pages of NFT owners using cursor pagination.
- * Returns Map<address, count>.
- */
 async function fetchNFTOwners(contractAddress) {
     console.log('[moralis] Fetching NFT owners (all pages)...');
     const ownerMap = new Map();
@@ -284,7 +251,8 @@ async function fetchNFTOwners(contractAddress) {
 
     console.log(`[moralis] Total: ${ownerMap.size} unique holders across ${page} pages`);
     if (ownerMap.size === 0) {
-    console.error('[moralis] ❌ ZERO NFT holders found. Check contract address or Moralis keys.');
+        console.error('[moralis] ❌ ZERO NFT holders found. Check contract address or Moralis keys.');
+    }
     return ownerMap;
 }
 
@@ -296,10 +264,6 @@ const TRANSFER_EVENT = parseAbiItem(
     'event Transfer(address indexed from, address indexed to, uint256 value)'
 );
 
-/**
- * Fetches Transfer logs in safe 2000-block chunks.
- * Adds a short delay between chunks to respect ANKR rate limits.
- */
 async function getLogsChunked(fromBlock, toBlock) {
     console.log(`[logs] Fetching [${fromBlock} → ${toBlock}] in ${MAX_LOG_RANGE}-block chunks...`);
     const allLogs = [];
@@ -335,10 +299,6 @@ async function getLogsChunked(fromBlock, toBlock) {
 // PRICE – ZLT/USDT from LP reserves
 // =============================================================================
 
-/**
- * Returns priceScaled = (reserveUSDT * SCALE) / reserveZLT
- * All math stays in BigInt.
- */
 async function getZLTPriceScaled() {
     const [reserves, token0Addr] = await Promise.all([
         withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.getReserves, functionName: 'getReserves' }), 'getReserves'),
@@ -358,22 +318,12 @@ async function getZLTPriceScaled() {
 // SCORING
 // =============================================================================
 
-/**
- * Computes ZPI component scores. Pure BigInt — no floats.
- *
- * tScore = W_TRADE × tradeUSD_7d
- * lScore = W_LP    × lpUSD
- * hScore = (nftCount × W_NFT) + ((balZLT / 1e5) × W_BAL), capped at H_CAP
- *          → reduced to 30% if 24h activity < $7
- * zpi    = tScore + lScore + hScore
- */
 function computeScores({ vol7d, vol24h, lpZLT, bal, nftCount, priceScaled, totalSupplyLP, reserveZLT }) {
     const tradeUSD_7d  = (vol7d  * priceScaled) / (WEI * SCALE);
     const tradeUSD_24h = (vol24h * priceScaled) / (WEI * SCALE);
 
     const tScore = W_TRADE * tradeUSD_7d;
 
-    // lpUSD still carries SCALE factor — normalise before the $7 check
     const lpUSD       = (lpZLT * priceScaled) / WEI;
     const lpUSDNormal = lpUSD  / SCALE;
     const lScore      = W_LP   * (lpUSD / SCALE);
@@ -384,8 +334,8 @@ function computeScores({ vol7d, vol24h, lpZLT, bal, nftCount, priceScaled, total
         hScore = (hScore * 3n) / 10n;
     }
 
-    const zpi = tScore + lScore + hScore;
-    const MAX_ZPI = 100_000_000n;          // 100 million max
+    let zpi = tScore + lScore + hScore;
+    const MAX_ZPI = 100_000_000n;
     if (zpi > MAX_ZPI) zpi = MAX_ZPI;
     return { tScore, lScore, hScore, zpi };
 }
@@ -406,10 +356,9 @@ async function run() {
     const currentBlock = await withRetry(() => rpc.getBlockNumber(), 'getBlockNumber');
     console.log(`[chain] Head block: ${currentBlock}`);
 
-    // Compute the 7-day lookback as the minimum sensible start
     const sevenDayBlock = currentBlock - LOOKBACK_BLOCKS;
 
-    let fromBlock = sevenDayBlock;  // default: 7 days ago
+    let fromBlock = sevenDayBlock;
 
     const { data: syncState, error: syncErr } = await supabase
         .from('sync_state')
@@ -420,7 +369,7 @@ async function run() {
     if (!syncErr && syncState) {
         const stored = BigInt(syncState.last_block_indexed);
         if (stored >= sevenDayBlock && stored < currentBlock) {
-            fromBlock = stored + 1n;  // resume from where we left off
+            fromBlock = stored + 1n;
             console.log(`[sync] Resuming from stored block: ${fromBlock}`);
         } else {
             console.log(`[sync] Stored block ${stored} out of useful range, using 7-day lookback: ${fromBlock}`);
@@ -440,7 +389,7 @@ async function run() {
     const nftOwners = await fetchNFTOwners(NFT_STAKING);
 
     // -------------------------------------------------------------------------
-    // 3. Fetch Transfer logs (chunked getLogs via ANKR)
+    // 3. Fetch Transfer logs (chunked getLogs)
     // -------------------------------------------------------------------------
     const logs = await getLogsChunked(fromBlock, currentBlock);
 
@@ -466,13 +415,12 @@ async function run() {
         activeAddrs.add(to);
     }
 
-    // Every NFT holder must be scored even with no transfers
     for (const addr of nftOwners.keys()) activeAddrs.add(addr);
 
     console.log(`[process] ${transfers.length} transfers, ${activeAddrs.size} unique addresses`);
 
     // -------------------------------------------------------------------------
-    // 5. Insert transfer logs (batched, with dedup via ON CONFLICT DO NOTHING)
+    // 5. Insert transfer logs (batched, with dedup)
     // -------------------------------------------------------------------------
     if (transfers.length > 0) {
         let inserted = 0;
@@ -486,7 +434,6 @@ async function run() {
         }
         console.log(`[db] Inserted/deduped ${inserted} transfer log rows`);
 
-        // Increment swaps_count per sender
         const swapCounts = {};
         for (const t of transfers) {
             swapCounts[t.wallet_address] = (swapCounts[t.wallet_address] || 0) + 1;
@@ -512,7 +459,7 @@ async function run() {
     else console.log('[db] Pruned transfer_logs older than 7 days');
 
     // -------------------------------------------------------------------------
-    // 7. Refresh volume aggregates (single-pass SQL function)
+    // 7. Refresh volume aggregates
     // -------------------------------------------------------------------------
     const { error: volErr } = await supabase.rpc('update_all_volumes');
     if (volErr) throw new Error(`update_all_volumes failed: ${volErr.message}`);
@@ -526,7 +473,6 @@ async function run() {
 
     const addrArgs = uniqueAddrs.map(a => [a]);
 
-    // Run sequentially (not Promise.all) to avoid doubling RPC rate limit pressure
     const zltBalances  = await batchRead(ZLT,         ABI.balanceOf, 'balanceOf', addrArgs);
     const lpBalances   = await batchRead(LP_ZLT_USDT, ABI.balanceOf, 'balanceOf', addrArgs);
     const lpBnbBalances = await batchRead(LP_ZLT_BNB, ABI.balanceOf, 'balanceOf', addrArgs);
@@ -534,7 +480,6 @@ async function run() {
     const totalSupplyLPBnb  = BigInt(await withRetry(() => rpc.readContract({ address: LP_ZLT_BNB,  abi: ABI.totalSupply, functionName: 'totalSupply' }), 'totalSupplyBnb'));
     const priceScaled  = await getZLTPriceScaled();
 
-    // Need reserveZLT to compute lpZLT per wallet — fetch from both pools
     const reserves   = await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.getReserves, functionName: 'getReserves' }), 'getReserves');
     const token0Addr = await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.token0, functionName: 'token0' }), 'token0');
     const isZLTFirst = token0Addr.toLowerCase() === ZLT.toLowerCase();
@@ -548,7 +493,7 @@ async function run() {
     console.log(`[chain] ZLT price (scaled): ${priceScaled}, LP USDT totalSupply: ${totalSupplyLP}, LP BNB totalSupply: ${totalSupplyLPBnb}`);
 
     // -------------------------------------------------------------------------
-    // 9. Bulk-fetch current wallet rows (volumes, swaps) — chunked + retried
+    // 9. Bulk-fetch current wallet rows
     // -------------------------------------------------------------------------
     const existingWallets = [];
     for (let i = 0; i < uniqueAddrs.length; i += ADDR_CHUNK) {
@@ -624,7 +569,7 @@ async function run() {
     console.log(`[db] Upserted ${upsertRows.length} wallet rows`);
 
     // -------------------------------------------------------------------------
-    // 12. Build leaderboard cache (top 100 by zpi_score)
+    // 12. Build leaderboard cache
     // -------------------------------------------------------------------------
     const { data: top100, error: topErr } = await supabase
         .from('wallets')
@@ -633,35 +578,26 @@ async function run() {
         .limit(100);
     if (topErr) throw new Error(`leaderboard fetch failed: ${topErr.message}`);
 
-    // Compute summary stats for the API response
-
-    // Cumulative transfer count from transfer_logs (not just this run)
     const { count: totalTxns, error: txnCountErr } = await supabase
         .from('transfer_logs')
         .select('*', { count: 'exact', head: true });
     if (txnCountErr) console.error('[db] transfer_logs count failed:', txnCountErr.message);
 
-    // Active wallets = wallets holding ZLT or an NFT (or both)
+    // Active wallets = wallets holding ZLT or an NFT
     const activeWalletSet = new Set();
-    let balCount = 0, nftCount = 0;
+    let balCount = 0, nftCountTotal = 0;
     for (let i = 0; i < uniqueAddrs.length; i++) {
         const addr = uniqueAddrs[i];
         const hasBal = zltBalances[i] > 0n;
         const hasNFT = nftOwners.has(addr);
         if (hasBal) balCount++;
-        if (hasNFT) nftCount++;
+        if (hasNFT) nftCountTotal++;
         if (hasBal || hasNFT) activeWalletSet.add(addr);
     }
-    console.log(`[debug] uniqueAddrs: ${uniqueAddrs.length}, with balance: ${balCount}, with NFT: ${nftCount}, activeWallets: ${activeWalletSet.size}`);
+    console.log(`[debug] uniqueAddrs: ${uniqueAddrs.length}, with balance: ${balCount}, with NFT: ${nftCountTotal}, activeWallets: ${activeWalletSet.size}`);
     const totalWallets = activeWalletSet.size;
-
-    // Unique NFT holder count (not total NFT count)
     const nftStaked = nftOwners.size;
-
-    // ZLT in LP = sum of ZLT reserves from both pools
     const zltInLP = (reserveZLT + reserveZLTBnb).toString();
-
-    // Expose ZLT price in USD for the frontend
     const zltPriceUSD = Number(priceScaled) / Number(SCALE);
 
     const { error: cacheErr } = await supabase
