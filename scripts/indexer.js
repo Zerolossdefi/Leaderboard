@@ -33,7 +33,7 @@ const ADDR_CHUNK      = 100;       // addresses per Supabase .in() query
 const DB_RETRIES      = 3;         // max retries for Supabase calls
 
 // How far back to start on first run 
-const LOOKBACK_BLOCKS = 0n;  
+const LOOKBACK_BLOCKS = 25_000_000n;  
 
 // Score weights (integer math only — no floats anywhere)
 const W_TRADE  = 1_020n;
