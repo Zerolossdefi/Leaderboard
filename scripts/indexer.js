@@ -19,21 +19,21 @@ const NFT_STAKING  = '0xa40984640D83230EE6Fa1d912E2030f8485b9eFc';
 const SCALE        = 10n ** 12n;   // price precision scaler
 const WEI          = 10n ** 18n;   // 1 ether in wei
 
-const MAX_LOG_RANGE   = 500n;    // blocks per getLogs chunk
-const RPC_BATCH_SIZE  = 1;         // parallel readContract calls per batch (low to avoid 429)
+const MAX_LOG_RANGE   = 2_000n;    // blocks per getLogs chunk
+const RPC_BATCH_SIZE  = 2;         // parallel readContract calls per batch (low to avoid 429)
 const DB_BATCH_SIZE   = 100;       // rows per supabase upsert
 const LOG_BATCH_SIZE  = 500;       // rows per transfer_logs insert
 const RPC_RETRIES     = 4;         // max retries per RPC call
 const RPC_DELAY_MS    = 300;       // base delay for exponential backoff
-const CHUNK_DELAY_MS  = 1000;       // delay between getLogs chunks
-const BATCH_DELAY_MS  = 2000;       // delay between each batchRead batch
+const CHUNK_DELAY_MS  = 500;       // delay between getLogs chunks
+const BATCH_DELAY_MS  = 800;       // delay between each batchRead batch
 const RPC_TIMEOUT_MS  = 30_000;    // per-request RPC timeout (ms)
 const DB_TIMEOUT_MS   = 30_000;    // per-request Supabase timeout (ms)
 const ADDR_CHUNK      = 100;       // addresses per Supabase .in() query
 const DB_RETRIES      = 3;         // max retries for Supabase calls
 
-// How far back to start on first run 
-const LOOKBACK_BLOCKS = 25_000_000n;  
+// How far back to start on first run (7 days of BSC blocks @ ~3s/block)
+const LOOKBACK_BLOCKS = 201_600n;  // 7 days
 
 // Score weights (integer math only — no floats anywhere)
 const W_TRADE  = 1_020n;
