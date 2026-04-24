@@ -52,10 +52,11 @@ export default async function handler(req, res) {
         return res.status(200).json({
             success:      true,
             updatedAt:    data.updated_at,
-            totalWallets: cached.totalWallets  ?? null,
-            totalTxns:    cached.totalTxns     ?? null,
-            nftStaked:    cached.nftStaked     ?? null,
+            activeWallets: cached.totalWallets ?? 0,  
+            totalTxns:    cached.totalTxns     ?? 0,
+            nftStaked:    cached.nftStaked     ?? 0,
             zltInLP:      cached.zltInLP       ?? null,
+            zltPriceUSD:  cached.zltPriceUSD   ?? null,
             leaderboard:  cached.top100        ?? [],
         });
 
