@@ -374,7 +374,7 @@ function computeScores({ vol7d, vol24h, lpZLT, bal, nftCount, priceScaled, total
     // lpUSD still carries SCALE factor — normalise before the $7 check
     const lpUSD       = (lpZLT * priceScaled) / WEI;
     const lpUSDNormal = lpUSD  / SCALE;
-    const lScore      = W_LP   * lpUSD;
+    const lScore      = W_LP   * (lpUSD / SCALE);
 
     let hScore = (nftCount * W_NFT) + (((bal / WEI) / 100_000n) * W_BAL);
     if (hScore > H_CAP) hScore = H_CAP;
@@ -383,6 +383,8 @@ function computeScores({ vol7d, vol24h, lpZLT, bal, nftCount, priceScaled, total
     }
 
     const zpi = tScore + lScore + hScore;
+    const MAX_ZPI = 100_000_000n;          // 100 million max
+    if (zpi > MAX_ZPI) zpi = MAX_ZPI;
     return { tScore, lScore, hScore, zpi };
 }
 
