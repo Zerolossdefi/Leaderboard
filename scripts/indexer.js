@@ -222,12 +222,12 @@ async function batchRead(contract, abi, functionName, argsList) {
             )
         );
         for (const r of settled) {
-            if (r.status === 'fulfilled') results.push(BigInt(r.value));
-            else {
-                console.error(`[batchRead] ${functionName} failed:`, r.reason?.message);
-                results.push(0n);
-            }
-        }
+        if (r.status === 'fulfilled') results.push(BigInt(r.value));
+        else {
+            console.error(`[batchRead] ${functionName} failed for args ${JSON.stringify(args)}:`, r.reason?.message);
+            results.push(0n);
+    }
+}
         await sleep(BATCH_DELAY_MS); // rate-limit protection between batches
     }
     return results;
@@ -283,6 +283,8 @@ async function fetchNFTOwners(contractAddress) {
     } while (cursor);
 
     console.log(`[moralis] Total: ${ownerMap.size} unique holders across ${page} pages`);
+    if (ownerMap.size === 0) {
+    console.error('[moralis] ❌ ZERO NFT holders found. Check contract address or Moralis keys.');
     return ownerMap;
 }
 
@@ -633,29 +635,33 @@ async function run() {
 
     // Compute summary stats for the API response
 
-    // Fix 2: Cumulative transfer count from transfer_logs (not just this run)
+    // Cumulative transfer count from transfer_logs (not just this run)
     const { count: totalTxns, error: txnCountErr } = await supabase
         .from('transfer_logs')
         .select('*', { count: 'exact', head: true });
     if (txnCountErr) console.error('[db] transfer_logs count failed:', txnCountErr.message);
 
-    // Fix 2 & 3: Active wallets = wallets holding ZLT or an NFT (or both)
+    // Active wallets = wallets holding ZLT or an NFT (or both)
     const activeWalletSet = new Set();
+    let balCount = 0, nftCount = 0;
     for (let i = 0; i < uniqueAddrs.length; i++) {
         const addr = uniqueAddrs[i];
         const hasBal = zltBalances[i] > 0n;
         const hasNFT = nftOwners.has(addr);
+        if (hasBal) balCount++;
+        if (hasNFT) nftCount++;
         if (hasBal || hasNFT) activeWalletSet.add(addr);
     }
+    console.log(`[debug] uniqueAddrs: ${uniqueAddrs.length}, with balance: ${balCount}, with NFT: ${nftCount}, activeWallets: ${activeWalletSet.size}`);
     const totalWallets = activeWalletSet.size;
 
-    // Fix 3: Unique NFT holder count (not total NFT count)
+    // Unique NFT holder count (not total NFT count)
     const nftStaked = nftOwners.size;
 
-    // Fix 4: ZLT in LP = sum of ZLT reserves from both pools
+    // ZLT in LP = sum of ZLT reserves from both pools
     const zltInLP = (reserveZLT + reserveZLTBnb).toString();
 
-    // Fix 1: Expose ZLT price in USD for the frontend
+    // Expose ZLT price in USD for the frontend
     const zltPriceUSD = Number(priceScaled) / Number(SCALE);
 
     const { error: cacheErr } = await supabase
