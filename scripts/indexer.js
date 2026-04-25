@@ -1,10 +1,11 @@
 // =============================================================================
 // ZPI Indexer – scripts/indexer.js
+// $0 infrastructure: dRPC + Lava Network RPC + Moralis NFT + Supabase
 // =============================================================================
 
-import { createClient } from '@supabase/supabase-js';
+import { createClient }                        from '@supabase/supabase-js';
 import { createPublicClient, custom, parseAbiItem } from 'viem';
-import { bsc } from 'viem/chains';
+import { bsc }                                 from 'viem/chains';
 import 'dotenv/config';
 
 // =============================================================================
@@ -13,30 +14,29 @@ import 'dotenv/config';
 const ZLT          = '0x05D8762946fA7620b263E1e77003927addf5f7E6';
 const LP_ZLT_USDT  = '0x9aa4073cc0e86508ce18788cdf0e6b6b46677b8d';
 const LP_ZLT_BNB   = '0xab168a06623ede1b6b590733952cca4d7123f1f5';
-const OAT_NFT      = '0x1d1C02F9fcff7EE2073a72181caE53563C82879C';   // OAT NFT address (holders get ZPI bonus)
-const STAKING_CONTRACT = '0xa40984640D83230EE6Fa1d912E2030f8485b9eFc'; // staking contract (total staked NFTs)
+const OAT_NFT      = '0x1d1C02F9fcff7EE2073a72181caE53563C82879C'; // OAT NFT — Moralis holders fetch
+const STAKING_CONTRACT = '0xa40984640D83230EE6Fa1d912E2030f8485b9eFc'; // Staking contract — totalStaked()
 
-const SCALE = 10n ** 12n;
-const WEI   = 10n ** 18n;
+const SCALE        = 10n ** 12n;   // price precision scaler
+const WEI          = 10n ** 18n;   // 1 ether in wei
 
-// RPC & safety – reduced for free-tier stability
-const MAX_LOG_RANGE   = 2000n;
-const RPC_BATCH_SIZE  = 2;
+const MAX_LOG_RANGE   = 2000n;      // 2000 blocks per chunk (was 500)
+const RPC_BATCH_SIZE  = 2;          // 2 parallel calls (safe for Lava)
 const DB_BATCH_SIZE   = 100;
 const LOG_BATCH_SIZE  = 500;
 const RPC_RETRIES     = 4;
-const RPC_DELAY_MS    = 100;
-const CHUNK_DELAY_MS  = 100;
-const BATCH_DELAY_MS  = 200;
+const RPC_DELAY_MS    = 100;        // shorter retry delay
+const CHUNK_DELAY_MS  = 100;        // 0.1 seconds between chunks
+const BATCH_DELAY_MS  = 200;        // 0.2 seconds between batchRead batches
 const RPC_TIMEOUT_MS  = 30_000;
 const DB_TIMEOUT_MS   = 30_000;
 const ADDR_CHUNK      = 100;
 const DB_RETRIES      = 3;
 
-// 7‑day lookback for incremental runs
-const LOOKBACK_BLOCKS = 201_600n;
+// How far back to start on first run 
+const LOOKBACK_BLOCKS = 201_600n;  
 
-// Score weights
+// Score weights (integer math only — no floats anywhere)
 const W_TRADE  = 1_020n;
 const W_LP     = 2_030n;
 const W_NFT    = 10_000n;
@@ -45,7 +45,7 @@ const H_CAP    = 6_000_000n;
 const ACTIVITY_THRESHOLD_USD = 7n;
 
 // =============================================================================
-// ENV & CLIENTS
+// ENV VALIDATION
 // =============================================================================
 const REQUIRED_ENVS = [
     'SUPABASE_URL',
@@ -55,19 +55,32 @@ const REQUIRED_ENVS = [
     'LAVA_URL',
 ];
 for (const key of REQUIRED_ENVS) {
-    if (!process.env[key]?.trim()) throw new Error(`Missing required env var: ${key}`);
+    if (!process.env[key]?.trim()) {
+        throw new Error(`Missing required env var: ${key}`);
+    }
 }
+
 const moralisKeys = process.env.MORALIS_KEYS.split(',').map(k => k.trim()).filter(Boolean);
-if (moralisKeys.length === 0) throw new Error('MORALIS_KEYS is empty');
+if (moralisKeys.length === 0) throw new Error('MORALIS_KEYS is empty after parsing');
 
-const RPC_URLS = [process.env.DRPC_URL.trim(), process.env.LAVA_URL.trim()];
+// RPC endpoints — dRPC primary, Lava Network secondary, public BSC fallback
+const RPC_URLS = [
+    process.env.DRPC_URL.trim(),
+    process.env.LAVA_URL.trim(),
+    'https://bsc-dataseed1.binance.org/',  // public fallback — no key required
+    'https://bsc-dataseed2.binance.org/',  // public fallback #2
+];
 
+// =============================================================================
+// CLIENTS
+// =============================================================================
 const supabase = createClient(
     process.env.SUPABASE_URL,
     process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
 let rpcIndex = 0;
+
 function customTransport(urls) {
     return custom({
         async request({ method, params }) {
@@ -76,19 +89,23 @@ function customTransport(urls) {
                 try {
                     const controller = new AbortController();
                     const timer = setTimeout(() => controller.abort(), RPC_TIMEOUT_MS);
-                    const res = await fetch(url, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ jsonrpc: '2.0', method, params, id: 1 }),
-                        signal: controller.signal,
-                    });
-                    clearTimeout(timer);
+                    let res;
+                    try {
+                        res = await fetch(url, {
+                            method:  'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body:    JSON.stringify({ jsonrpc: '2.0', method, params, id: 1 }),
+                            signal:  controller.signal,
+                        });
+                    } finally {
+                        clearTimeout(timer);
+                    }
                     if (!res.ok) throw new Error(`HTTP ${res.status}`);
                     const json = await res.json();
                     if (json.error) throw new Error(json.error.message);
                     return json.result;
                 } catch (err) {
-                    console.warn(`[rpc] ${url} failed: ${err.message} — switching`);
+                    console.warn(`[rpc] ${url} failed: ${err.message} — switching endpoint`);
                     rpcIndex = (rpcIndex + 1) % urls.length;
                 }
             }
@@ -105,16 +122,20 @@ const rpc = createPublicClient({
 // =============================================================================
 // UTILITIES
 // =============================================================================
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
+function sleep(ms) {
+    return new Promise(r => setTimeout(r, ms));
+}
 
 async function withRetry(fn, label = 'rpc') {
     for (let attempt = 0; attempt < RPC_RETRIES; attempt++) {
         try {
             return await fn();
         } catch (err) {
-            if (attempt === RPC_RETRIES - 1) throw err;
+            const isLast = attempt === RPC_RETRIES - 1;
+            if (isLast) throw err;
             const delay = RPC_DELAY_MS * 2 ** attempt;
-            console.warn(`[retry] ${label} attempt ${attempt+1}/${RPC_RETRIES} — ${err.message}`);
+            console.warn(`[retry] ${label} failed (attempt ${attempt + 1}/${RPC_RETRIES}), retrying in ${delay}ms — ${err.message}`);
             await sleep(delay);
         }
     }
@@ -125,13 +146,18 @@ async function supabaseWithRetry(fn, label = 'db') {
         try {
             const result = await Promise.race([
                 fn(),
-                new Promise((_, reject) => setTimeout(() => reject(new Error(`Supabase timeout`)), DB_TIMEOUT_MS)),
+                new Promise((_, reject) =>
+                    setTimeout(() => reject(new Error(`Supabase timeout after ${DB_TIMEOUT_MS}ms`)), DB_TIMEOUT_MS)
+                ),
             ]);
             if (result?.error) throw new Error(result.error.message);
             return result;
         } catch (err) {
-            if (attempt === DB_RETRIES - 1) throw err;
-            await sleep(RPC_DELAY_MS * 2 ** attempt);
+            const isLast = attempt === DB_RETRIES - 1;
+            if (isLast) throw err;
+            const delay = RPC_DELAY_MS * 2 ** attempt;
+            console.warn(`[db-retry] ${label} failed (attempt ${attempt + 1}/${DB_RETRIES}), retrying in ${delay}ms — ${err.message}`);
+            await sleep(delay);
         }
     }
 }
@@ -141,25 +167,26 @@ function makeAbi(name, inputs, outputs) {
         name,
         type: 'function',
         stateMutability: 'view',
-        inputs: inputs.map((type, i) => ({ name: `i${i}`, type })),
+        inputs:  inputs.map((type, i) => ({ name: `i${i}`, type })),
         outputs: outputs.map((type, i) => ({ name: `o${i}`, type })),
     }];
 }
+
 const ABI = {
     balanceOf:   makeAbi('balanceOf',   ['address'], ['uint256']),
     totalSupply: makeAbi('totalSupply', [],           ['uint256']),
     token0:      makeAbi('token0',      [],           ['address']),
     getReserves: [{
-        name: 'getReserves',
-        type: 'function',
-        stateMutability: 'view',
+        name: 'getReserves', type: 'function', stateMutability: 'view',
         inputs: [],
         outputs: [
-            { name: '_reserve0', type: 'uint112' },
-            { name: '_reserve1', type: 'uint112' },
-            { name: '_blockTimestampLast', type: 'uint32' },
+            { name: '_reserve0',          type: 'uint112' },
+            { name: '_reserve1',          type: 'uint112' },
+            { name: '_blockTimestampLast', type: 'uint32'  },
         ],
     }],
+    // Staking contract: returns total number of NFTs currently staked
+    totalStaked: makeAbi('totalStaked', [], ['uint256']),
 };
 
 async function batchRead(contract, abi, functionName, argsList) {
@@ -167,11 +194,19 @@ async function batchRead(contract, abi, functionName, argsList) {
     for (let i = 0; i < argsList.length; i += RPC_BATCH_SIZE) {
         const batch = argsList.slice(i, i + RPC_BATCH_SIZE);
         const settled = await Promise.allSettled(
-            batch.map(args => withRetry(() => rpc.readContract({ address: contract, abi, functionName, args }), `${functionName}(${args[0]})`))
+            batch.map(args =>
+                withRetry(
+                    () => rpc.readContract({ address: contract, abi, functionName, args }),
+                    `${functionName}(${args[0]})`
+                )
+            )
         );
         for (const r of settled) {
             if (r.status === 'fulfilled') results.push(BigInt(r.value));
-            else { console.error(`[batchRead] ${functionName} failed:`, r.reason?.message); results.push(0n); }
+            else {
+                console.error(`[batchRead] ${functionName} failed for args ${JSON.stringify(args)}:`, r.reason?.message);
+                results.push(0n);
+            }
         }
         await sleep(BATCH_DELAY_MS);
     }
@@ -179,8 +214,9 @@ async function batchRead(contract, abi, functionName, argsList) {
 }
 
 // =============================================================================
-// MORALIS – OAT NFT OWNER FETCH
+// MORALIS – NFT OWNER FETCH (PAGINATED)
 // =============================================================================
+
 async function moralisFetch(path) {
     for (const key of moralisKeys) {
         try {
@@ -188,83 +224,121 @@ async function moralisFetch(path) {
                 headers: { 'X-API-Key': key },
             });
             if (res.status === 200) return await res.json();
-            if (res.status === 401) { console.warn('[moralis] 401 on key, rotating'); continue; }
+            if (res.status === 401) { console.warn('[moralis] 401 on key, rotating...'); continue; }
             throw new Error(`Moralis HTTP ${res.status}`);
         } catch (err) {
-            console.warn(`[moralis] key failed: ${err.message}`);
+            console.warn(`[moralis] key failed: ${err.message}, rotating...`);
         }
     }
     throw new Error('All Moralis keys exhausted');
 }
 
 async function fetchNFTOwners(contractAddress) {
-    console.log('[moralis] Fetching OAT NFT owners...');
+    console.log('[moralis] Fetching NFT owners (all pages)...');
     const ownerMap = new Map();
-    let cursor = null, page = 0;
+    let cursor     = null;
+    let page       = 0;
+
     do {
-        const qs = `chain=bsc&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+        const qs  = `chain=bsc&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
         const data = await moralisFetch(`/nft/${contractAddress}/owners?${qs}`);
         if (!data?.result?.length) break;
+
         for (const nft of data.result) {
             const owner = nft.owner_of.toLowerCase();
             ownerMap.set(owner, (ownerMap.get(owner) || 0) + 1);
         }
+
         cursor = data.cursor ?? null;
         page++;
-        console.log(`[moralis] Page ${page}: ${data.result.length} NFTs`);
+        console.log(`[moralis] Page ${page}: ${data.result.length} NFTs, cursor: ${cursor ? 'yes' : 'end'}`);
     } while (cursor);
-    console.log(`[moralis] Total unique OAT NFT holders: ${ownerMap.size}`);
-    if (ownerMap.size === 0) console.error('[moralis] ❌ No OAT NFT holders. Check contract or keys.');
+
+    console.log(`[moralis] Total: ${ownerMap.size} unique holders across ${page} pages`);
+    if (ownerMap.size === 0) {
+        console.error('[moralis] ❌ ZERO NFT holders found. Check contract address or Moralis keys.');
+    }
     return ownerMap;
 }
 
 // =============================================================================
-// BLOCKCHAIN – ZLT TRANSFER LOGS
+// BLOCKCHAIN – CHUNKED getLogs
 // =============================================================================
-const TRANSFER_EVENT = parseAbiItem('event Transfer(address indexed from, address indexed to, uint256 value)');
+
+const TRANSFER_EVENT = parseAbiItem(
+    'event Transfer(address indexed from, address indexed to, uint256 value)'
+);
 
 async function getLogsChunked(fromBlock, toBlock) {
-    console.log(`[logs] Fetching blocks ${fromBlock} → ${toBlock} in ${MAX_LOG_RANGE}-block chunks`);
+    console.log(`[logs] Fetching [${fromBlock} → ${toBlock}] in ${MAX_LOG_RANGE}-block chunks...`);
     const allLogs = [];
-    let start = fromBlock, chunk = 0;
+    let start     = fromBlock;
+    let chunk     = 0;
+
     while (start <= toBlock) {
-        const end = start + MAX_LOG_RANGE - 1n <= toBlock ? start + MAX_LOG_RANGE - 1n : toBlock;
-        const logs = await withRetry(() => rpc.getLogs({ address: ZLT, event: TRANSFER_EVENT, fromBlock: start, toBlock: end }), `getLogs[${start}-${end}]`);
+        const end = start + MAX_LOG_RANGE - 1n <= toBlock
+            ? start + MAX_LOG_RANGE - 1n
+            : toBlock;
+
+        const logs = await withRetry(
+            () => rpc.getLogs({ address: ZLT, event: TRANSFER_EVENT, fromBlock: start, toBlock: end }),
+            `getLogs[${start}-${end}]`
+        );
+
         allLogs.push(...logs);
         chunk++;
-        if (chunk % 50 === 0) console.log(`[logs] Chunk ${chunk}: up to block ${end}, total logs: ${allLogs.length}`);
+
+        if (chunk % 10 === 0) {
+            console.log(`[logs] Chunk ${chunk}: processed up to block ${end}, total logs: ${allLogs.length}`);
+        }
+
         start = end + 1n;
         if (start <= toBlock) await sleep(CHUNK_DELAY_MS);
     }
-    console.log(`[logs] Done — ${allLogs.length} Transfer events`);
+
+    console.log(`[logs] Done — ${allLogs.length} Transfer events in ${chunk} chunks`);
     return allLogs;
 }
 
 // =============================================================================
-// PRICE & SCORING
+// PRICE – ZLT/USDT from LP reserves
 // =============================================================================
+
 async function getZLTPriceScaled() {
     const [reserves, token0Addr] = await Promise.all([
         withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.getReserves, functionName: 'getReserves' }), 'getReserves'),
-        withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.token0, functionName: 'token0' }), 'token0'),
+        withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.token0,      functionName: 'token0'      }), 'token0'),
     ]);
-    const isZLTFirst = token0Addr.toLowerCase() === ZLT.toLowerCase();
-    const reserveZLT = BigInt(isZLTFirst ? reserves[0] : reserves[1]);
+
+    const isZLTFirst  = token0Addr.toLowerCase() === ZLT.toLowerCase();
+    const reserveZLT  = BigInt(isZLTFirst ? reserves[0] : reserves[1]);
     const reserveUSDT = BigInt(isZLTFirst ? reserves[1] : reserves[0]);
-    if (reserveZLT === 0n) throw new Error('ZLT reserve zero');
+
+    if (reserveZLT === 0n) throw new Error('ZLT reserve is zero — check LP address or pool state');
+
     return (reserveUSDT * SCALE) / reserveZLT;
 }
 
-function computeScores({ vol7d, vol24h, lpZLT, bal, nftCount, priceScaled }) {
-    const tradeUSD_7d  = (vol7d * priceScaled) / (WEI * SCALE);
+// =============================================================================
+// SCORING
+// =============================================================================
+
+function computeScores({ vol7d, vol24h, lpZLT, bal, nftCount, priceScaled, totalSupplyLP, reserveZLT }) {
+    const tradeUSD_7d  = (vol7d  * priceScaled) / (WEI * SCALE);
     const tradeUSD_24h = (vol24h * priceScaled) / (WEI * SCALE);
+
     const tScore = W_TRADE * tradeUSD_7d;
-    const lpUSD = (lpZLT * priceScaled) / WEI;
-    const lpUSDNormal = lpUSD / SCALE;
-    const lScore = W_LP * (lpUSD / SCALE);
+
+    const lpUSD       = (lpZLT * priceScaled) / WEI;
+    const lpUSDNormal = lpUSD  / SCALE;
+    const lScore      = W_LP   * (lpUSD / SCALE);
+
     let hScore = (nftCount * W_NFT) + (((bal / WEI) / 100_000n) * W_BAL);
     if (hScore > H_CAP) hScore = H_CAP;
-    if ((tradeUSD_24h + lpUSDNormal) < ACTIVITY_THRESHOLD_USD) hScore = (hScore * 3n) / 10n;
+    if ((tradeUSD_24h + lpUSDNormal) < ACTIVITY_THRESHOLD_USD) {
+        hScore = (hScore * 3n) / 10n;
+    }
+
     let zpi = tScore + lScore + hScore;
     const MAX_ZPI = 100_000_000n;
     if (zpi > MAX_ZPI) zpi = MAX_ZPI;
@@ -274,6 +348,7 @@ function computeScores({ vol7d, vol24h, lpZLT, bal, nftCount, priceScaled }) {
 // =============================================================================
 // MAIN
 // =============================================================================
+
 async function run() {
     console.log('⚡ ZPI Indexer starting...');
     console.log(`   dRPC URL : ${process.env.DRPC_URL}`);
@@ -281,12 +356,13 @@ async function run() {
     console.log(`   Moralis  : ${moralisKeys.length} key(s)`);
 
     // -------------------------------------------------------------------------
-    // 1. Current block & sync state
+    // 1. Resolve current block + fromBlock
     // -------------------------------------------------------------------------
     const currentBlock = await withRetry(() => rpc.getBlockNumber(), 'getBlockNumber');
     console.log(`[chain] Head block: ${currentBlock}`);
 
     const sevenDayBlock = currentBlock - LOOKBACK_BLOCKS;
+
     let fromBlock = sevenDayBlock;
 
     const { data: syncState, error: syncErr } = await supabase
@@ -301,185 +377,221 @@ async function run() {
             fromBlock = stored + 1n;
             console.log(`[sync] Resuming from stored block: ${fromBlock}`);
         } else {
-            console.log(`[sync] Using 7-day lookback: ${fromBlock}`);
+            console.log(`[sync] Stored block ${stored} out of useful range, using 7-day lookback: ${fromBlock}`);
         }
     } else {
-        console.log(`[sync] No sync state, starting from 7-day lookback: ${fromBlock}`);
+        console.log(`[sync] No sync state found, starting from 7-day lookback: ${fromBlock}`);
     }
 
     if (fromBlock > currentBlock) {
-        console.log('[sync] Already up to date. Exiting.');
+        console.log('[sync] Already up to date. Nothing to do.');
         return;
     }
 
     // -------------------------------------------------------------------------
-    // 2. Fetch OAT NFT holders (for ZPI bonus and active wallets)
+    // 2. Fetch NFT holders (Moralis, paginated)
     // -------------------------------------------------------------------------
     const nftOwners = await fetchNFTOwners(OAT_NFT);
 
-    // -------------------------------------------------------------------------
-    // 3. Fetch total staked NFTs from staking contract (for "NFTs Staked" stat)
-    // -------------------------------------------------------------------------
-    let totalStakedNFTs = 0n;
+    // Fetch total staked NFT count from staking contract (separate from OAT holders)
+    let stakedNFTCount = 0;
     try {
-        const stakingAbi = [{
-            name: 'totalStaked',
-            type: 'function',
-            stateMutability: 'view',
-            inputs: [],
-            outputs: [{ name: '', type: 'uint256' }],
-        }];
-        const staked = await withRetry(() => rpc.readContract({
-            address: STAKING_CONTRACT,
-            abi: stakingAbi,
-            functionName: 'totalStaked',
-        }), 'totalStaked');
-        totalStakedNFTs = BigInt(staked);
-        console.log(`[staking] Total staked NFTs: ${totalStakedNFTs.toString()}`);
+        const raw = await withRetry(
+            () => rpc.readContract({
+                address: STAKING_CONTRACT,
+                abi: ABI.totalStaked,
+                functionName: 'totalStaked',
+            }),
+            'totalStaked'
+        );
+        stakedNFTCount = Number(BigInt(raw));
+        console.log(`[chain] Staked NFTs: ${stakedNFTCount}`);
     } catch (err) {
-        console.warn('[staking] Could not fetch totalStaked, using 0:', err.message);
+        console.error('[chain] totalStaked() failed — defaulting to 0:', err.message);
     }
 
     // -------------------------------------------------------------------------
-    // 4. Fetch ZLT transfer logs
+    // 3. Fetch Transfer logs (chunked getLogs)
     // -------------------------------------------------------------------------
     const logs = await getLogsChunked(fromBlock, currentBlock);
 
     // -------------------------------------------------------------------------
-    // 5. Build transfers and active address set
+    // 4. Process logs → transfer records + active address set
     // -------------------------------------------------------------------------
-    const transfers = [];
+    const transfers   = [];
     const activeAddrs = new Set();
 
     for (const log of logs) {
         const from = log.args.from.toLowerCase();
-        const to = log.args.to.toLowerCase();
+        const to   = log.args.to.toLowerCase();
+
         transfers.push({
             wallet_address: from,
-            value_wei: log.args.value.toString(),
-            block_number: Number(log.blockNumber),
-            tx_hash: log.transactionHash.toLowerCase(),
-            log_index: Number(log.logIndex),
+            value_wei:      log.args.value.toString(),
+            block_number:   Number(log.blockNumber),
+            tx_hash:        log.transactionHash.toLowerCase(),
+            log_index:      Number(log.logIndex),
         });
+
         activeAddrs.add(from);
         activeAddrs.add(to);
     }
-    // Add all OAT NFT holders (even without ZLT transfers)
+
     for (const addr of nftOwners.keys()) activeAddrs.add(addr);
 
-    console.log(`[process] Transfers: ${transfers.length}, unique addresses: ${activeAddrs.size}`);
+    console.log(`[process] ${transfers.length} transfers, ${activeAddrs.size} unique addresses`);
 
     // -------------------------------------------------------------------------
-    // 6. Insert transfer logs
+    // 5. Insert transfer logs (batched, with dedup)
     // -------------------------------------------------------------------------
     if (transfers.length > 0) {
+        let inserted = 0;
         for (let i = 0; i < transfers.length; i += LOG_BATCH_SIZE) {
             const batch = transfers.slice(i, i + LOG_BATCH_SIZE);
             const { error } = await supabase
                 .from('transfer_logs')
                 .upsert(batch, { onConflict: 'tx_hash,log_index', ignoreDuplicates: true });
             if (error) throw new Error(`transfer_logs insert failed: ${error.message}`);
+            inserted += batch.length;
         }
-        console.log(`[db] Inserted ${transfers.length} transfer logs`);
+        console.log(`[db] Inserted/deduped ${inserted} transfer log rows`);
 
         const swapCounts = {};
-        for (const t of transfers) swapCounts[t.wallet_address] = (swapCounts[t.wallet_address] || 0) + 1;
-        await Promise.allSettled(Object.entries(swapCounts).map(([addr, inc]) => supabase.rpc('increment_swaps', { addr, inc })));
+        for (const t of transfers) {
+            swapCounts[t.wallet_address] = (swapCounts[t.wallet_address] || 0) + 1;
+        }
+        const incResults = await Promise.allSettled(
+            Object.entries(swapCounts).map(([addr, inc]) =>
+                supabase.rpc('increment_swaps', { addr, inc })
+            )
+        );
+        const incFailed = incResults.filter(r => r.status === 'rejected').length;
+        if (incFailed > 0) console.error(`[db] ${incFailed} increment_swaps calls failed`);
     }
 
     // -------------------------------------------------------------------------
-    // 7. Prune old logs
+    // 6. Prune transfer_logs older than 7 days
     // -------------------------------------------------------------------------
-    const cutoff = new Date(Date.now() - 7 * 86400000).toISOString();
-    await supabase.from('transfer_logs').delete().lt('created_at', cutoff);
-    console.log('[db] Pruned logs older than 7 days');
+    const cutoff = new Date(Date.now() - 7 * 86_400_000).toISOString();
+    const { error: pruneErr } = await supabase
+        .from('transfer_logs')
+        .delete()
+        .lt('created_at', cutoff);
+    if (pruneErr) console.error('[db] Prune failed:', pruneErr.message);
+    else console.log('[db] Pruned transfer_logs older than 7 days');
 
     // -------------------------------------------------------------------------
-    // 8. Refresh volume aggregates
+    // 7. Refresh volume aggregates
     // -------------------------------------------------------------------------
     const { error: volErr } = await supabase.rpc('update_all_volumes');
     if (volErr) throw new Error(`update_all_volumes failed: ${volErr.message}`);
     console.log('[db] Volume aggregates refreshed');
 
     // -------------------------------------------------------------------------
-    // 9. On-chain data for all active addresses
+    // 8. On-chain data: balances, LP, price
     // -------------------------------------------------------------------------
     const uniqueAddrs = [...activeAddrs];
     console.log(`[chain] Fetching on-chain data for ${uniqueAddrs.length} addresses...`);
 
     const addrArgs = uniqueAddrs.map(a => [a]);
-    const zltBalances = await batchRead(ZLT, ABI.balanceOf, 'balanceOf', addrArgs);
-    const lpBalances = await batchRead(LP_ZLT_USDT, ABI.balanceOf, 'balanceOf', addrArgs);
-    const lpBnbBalances = await batchRead(LP_ZLT_BNB, ABI.balanceOf, 'balanceOf', addrArgs);
-    const totalSupplyLP = BigInt(await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.totalSupply, functionName: 'totalSupply' })));
-    const totalSupplyLPBnb = BigInt(await withRetry(() => rpc.readContract({ address: LP_ZLT_BNB, abi: ABI.totalSupply, functionName: 'totalSupply' })));
-    const priceScaled = await getZLTPriceScaled();
 
-    const reserves = await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.getReserves, functionName: 'getReserves' }));
-    const token0Addr = await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.token0, functionName: 'token0' }));
+    const zltBalances  = await batchRead(ZLT,         ABI.balanceOf, 'balanceOf', addrArgs);
+    const lpBalances   = await batchRead(LP_ZLT_USDT, ABI.balanceOf, 'balanceOf', addrArgs);
+    const lpBnbBalances = await batchRead(LP_ZLT_BNB, ABI.balanceOf, 'balanceOf', addrArgs);
+    const totalSupplyLP     = BigInt(await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.totalSupply, functionName: 'totalSupply' }), 'totalSupply'));
+    const totalSupplyLPBnb  = BigInt(await withRetry(() => rpc.readContract({ address: LP_ZLT_BNB,  abi: ABI.totalSupply, functionName: 'totalSupply' }), 'totalSupplyBnb'));
+    const priceScaled  = await getZLTPriceScaled();
+
+    const reserves   = await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.getReserves, functionName: 'getReserves' }), 'getReserves');
+    const token0Addr = await withRetry(() => rpc.readContract({ address: LP_ZLT_USDT, abi: ABI.token0, functionName: 'token0' }), 'token0');
     const isZLTFirst = token0Addr.toLowerCase() === ZLT.toLowerCase();
     const reserveZLT = BigInt(isZLTFirst ? reserves[0] : reserves[1]);
 
-    const reservesBnb = await withRetry(() => rpc.readContract({ address: LP_ZLT_BNB, abi: ABI.getReserves, functionName: 'getReserves' }));
-    const token0BnbAddr = await withRetry(() => rpc.readContract({ address: LP_ZLT_BNB, abi: ABI.token0, functionName: 'token0' }));
-    const isZLTFirstBnb = token0BnbAddr.toLowerCase() === ZLT.toLowerCase();
-    const reserveZLTBnb = BigInt(isZLTFirstBnb ? reservesBnb[0] : reservesBnb[1]);
+    const reservesBnb   = await withRetry(() => rpc.readContract({ address: LP_ZLT_BNB, abi: ABI.getReserves, functionName: 'getReserves' }), 'getReservesBnb');
+    const token0BnbAddr = await withRetry(() => rpc.readContract({ address: LP_ZLT_BNB, abi: ABI.token0, functionName: 'token0' }), 'token0Bnb');
+    const isZLTFirstBnb  = token0BnbAddr.toLowerCase() === ZLT.toLowerCase();
+    const reserveZLTBnb  = BigInt(isZLTFirstBnb ? reservesBnb[0] : reservesBnb[1]);
+
+    console.log(`[chain] ZLT price (scaled): ${priceScaled}, LP USDT totalSupply: ${totalSupplyLP}, LP BNB totalSupply: ${totalSupplyLPBnb}`);
 
     // -------------------------------------------------------------------------
-    // 10. Fetch existing wallet volumes
+    // 9. Bulk-fetch current wallet rows
     // -------------------------------------------------------------------------
     const existingWallets = [];
     for (let i = 0; i < uniqueAddrs.length; i += ADDR_CHUNK) {
         const chunk = uniqueAddrs.slice(i, i + ADDR_CHUNK);
-        const result = await supabaseWithRetry(() => supabase.from('wallets').select('address, volume_24h_wei, volume_7d_wei, swaps_count').in('address', chunk));
+        const result = await supabaseWithRetry(
+            () => supabase
+                .from('wallets')
+                .select('address, volume_24h_wei, volume_7d_wei, swaps_count')
+                .in('address', chunk),
+            `wallets fetch chunk ${Math.floor(i / ADDR_CHUNK) + 1}`
+        );
         if (result?.data) existingWallets.push(...result.data);
     }
-    const walletMap = new Map(existingWallets.map(w => [w.address, w]));
+
+    const walletMap = new Map(
+        (existingWallets ?? []).map(w => [w.address, w])
+    );
 
     // -------------------------------------------------------------------------
-    // 11. Compute scores and prepare rows
+    // 10. Compute ZPI scores
     // -------------------------------------------------------------------------
     const upsertRows = [];
+
     for (let i = 0; i < uniqueAddrs.length; i++) {
-        const addr = uniqueAddrs[i];
-        const bal = zltBalances[i];
+        const addr  = uniqueAddrs[i];
+        const bal   = zltBalances[i];
         const lpBal = lpBalances[i];
-        const lpZLT = (totalSupplyLP > 0n ? (lpBal * reserveZLT) / totalSupplyLP : 0n)
-                    + (totalSupplyLPBnb > 0n ? (lpBnbBalances[i] * reserveZLTBnb) / totalSupplyLPBnb : 0n);
-        const stored = walletMap.get(addr);
-        const vol7d = stored?.volume_7d_wei ? BigInt(stored.volume_7d_wei) : 0n;
-        const vol24h = stored?.volume_24h_wei ? BigInt(stored.volume_24h_wei) : 0n;
+
+        const lpZLT = (totalSupplyLP > 0n
+            ? (lpBal * reserveZLT) / totalSupplyLP
+            : 0n)
+            + (totalSupplyLPBnb > 0n
+            ? (lpBnbBalances[i] * reserveZLTBnb) / totalSupplyLPBnb
+            : 0n);
+
+        const stored   = walletMap.get(addr);
+        const vol7d    = stored?.volume_7d_wei  ? BigInt(stored.volume_7d_wei)  : 0n;
+        const vol24h   = stored?.volume_24h_wei ? BigInt(stored.volume_24h_wei) : 0n;
         const swapsCount = stored?.swaps_count ?? 0;
-        const nftCount = BigInt(nftOwners.get(addr) ?? 0);
-        const { tScore, lScore, hScore, zpi } = computeScores({ vol7d, vol24h, lpZLT, bal, nftCount, priceScaled });
+        const nftCount   = BigInt(nftOwners.get(addr) ?? 0);
+
+        const { tScore, lScore, hScore, zpi } = computeScores({
+            vol7d, vol24h, lpZLT, bal,
+            nftCount, priceScaled,
+            totalSupplyLP, reserveZLT,
+        });
+
         upsertRows.push({
-            address: addr,
+            address:         addr,
             zlt_balance_wei: bal.toString(),
-            lp_amount_zlt: lpZLT.toString(),
-            nft_count: Number(nftCount),
-            volume_7d_wei: vol7d.toString(),
-            volume_24h_wei: vol24h.toString(),
-            swaps_count: swapsCount,
-            zpi_score: zpi.toString(),
-            t_score: tScore.toString(),
-            l_score: lScore.toString(),
-            h_score: hScore.toString(),
-            last_updated: new Date().toISOString(),
+            lp_amount_zlt:   lpZLT.toString(),
+            nft_count:       Number(nftCount),
+            volume_7d_wei:   vol7d.toString(),
+            volume_24h_wei:  vol24h.toString(),
+            swaps_count:     swapsCount,
+            zpi_score:       zpi.toString(),
+            t_score:         tScore.toString(),
+            l_score:         lScore.toString(),
+            h_score:         hScore.toString(),
+            last_updated:    new Date().toISOString(),
         });
     }
 
     // -------------------------------------------------------------------------
-    // 12. Upsert wallets in batches of 50
+    // 11. Upsert wallets in batches
     // -------------------------------------------------------------------------
     for (let i = 0; i < upsertRows.length; i += DB_BATCH_SIZE) {
-        const batch = upsertRows.slice(i, i + DB_BATCH_SIZE);
-        const { error } = await supabase.from('wallets').upsert(batch);
+        const { error } = await supabase
+            .from('wallets')
+            .upsert(upsertRows.slice(i, i + DB_BATCH_SIZE));
         if (error) throw new Error(`wallets upsert failed: ${error.message}`);
     }
     console.log(`[db] Upserted ${upsertRows.length} wallet rows`);
 
     // -------------------------------------------------------------------------
-    // 13. Build leaderboard cache
+    // 12. Build leaderboard cache
     // -------------------------------------------------------------------------
     const { data: top100, error: topErr } = await supabase
         .from('wallets')
@@ -491,9 +603,9 @@ async function run() {
     const { count: totalTxns, error: txnCountErr } = await supabase
         .from('transfer_logs')
         .select('*', { count: 'exact', head: true });
-    if (txnCountErr) console.error('[db] transfer_logs count error:', txnCountErr.message);
+    if (txnCountErr) console.error('[db] transfer_logs count failed:', txnCountErr.message);
 
-    // Active wallets = wallets holding ZLT (current balance) OR OAT NFT
+    // Active wallets = wallets holding ZLT or an NFT
     const activeWalletSet = new Set();
     let balCount = 0, nftCountTotal = 0;
     for (let i = 0; i < uniqueAddrs.length; i++) {
@@ -504,38 +616,33 @@ async function run() {
         if (hasNFT) nftCountTotal++;
         if (hasBal || hasNFT) activeWalletSet.add(addr);
     }
-    console.log(`[debug] uniqueAddrs: ${uniqueAddrs.length}, with balance: ${balCount}, with OAT NFT: ${nftCountTotal}, activeWallets: ${activeWalletSet.size}`);
+    console.log(`[debug] uniqueAddrs: ${uniqueAddrs.length}, with balance: ${balCount}, with NFT: ${nftCountTotal}, activeWallets: ${activeWalletSet.size}`);
     const totalWallets = activeWalletSet.size;
-    const nftStaked = Number(totalStakedNFTs);          // from staking contract
+    // nftStaked = total NFTs staked in staking contract (from totalStaked())
+    // nftOwners.size = unique OAT holders (used for scoring)
+    const nftStaked = stakedNFTCount > 0 ? stakedNFTCount : nftOwners.size;
     const zltInLP = (reserveZLT + reserveZLTBnb).toString();
     const zltPriceUSD = Number(priceScaled) / Number(SCALE);
 
     const { error: cacheErr } = await supabase
         .from('leaderboard_cache')
         .upsert({
-            id: 1,
-            data: {
-                top100,
-                totalWallets,
-                totalTxns: totalTxns ?? 0,
-                nftStaked,
-                zltInLP,
-                zltPriceUSD,
-            },
+            id:         1,
+            data:       { top100, totalWallets, totalTxns: totalTxns ?? 0, nftStaked, zltInLP, zltPriceUSD },
             updated_at: new Date().toISOString(),
         });
-    if (cacheErr) console.error('[db] cache upsert failed:', cacheErr.message);
+    if (cacheErr) console.error('[db] leaderboard_cache upsert failed:', cacheErr.message);
     else console.log('[db] Leaderboard cache updated');
 
     // -------------------------------------------------------------------------
-    // 14. Update sync state
+    // 13. Update sync state
     // -------------------------------------------------------------------------
     const { error: syncUpdateErr } = await supabase
         .from('sync_state')
         .upsert({
-            id: 'main_sync',
+            id:                 'main_sync',
             last_block_indexed: Number(currentBlock),
-            last_full_sync: new Date().toISOString(),
+            last_full_sync:     new Date().toISOString(),
         });
     if (syncUpdateErr) throw new Error(`sync_state update failed: ${syncUpdateErr.message}`);
 
