@@ -14,26 +14,26 @@ import 'dotenv/config';
 const ZLT          = '0x05D8762946fA7620b263E1e77003927addf5f7E6';
 const LP_ZLT_USDT  = '0x9aa4073cc0e86508ce18788cdf0e6b6b46677b8d';
 const LP_ZLT_BNB   = '0xab168a06623ede1b6b590733952cca4d7123f1f5';
-const NFT_STAKING  = '0xa40984640D83230EE6Fa1d912E2030f8485b9eFc';
+const NFT_STAKING  = '0xd1C02F9fcf7EE2073a72181caE53563C82879C';   // OAT NFT address
 
 const SCALE        = 10n ** 12n;   // price precision scaler
 const WEI          = 10n ** 18n;   // 1 ether in wei
 
-const MAX_LOG_RANGE   = 2_000n;    // blocks per getLogs chunk
-const RPC_BATCH_SIZE  = 2;         // parallel readContract calls per batch (low to avoid 429)
-const DB_BATCH_SIZE   = 100;       // rows per supabase upsert
-const LOG_BATCH_SIZE  = 500;       // rows per transfer_logs insert
-const RPC_RETRIES     = 4;         // max retries per RPC call
-const RPC_DELAY_MS    = 300;       // base delay for exponential backoff
-const CHUNK_DELAY_MS  = 500;       // delay between getLogs chunks
-const BATCH_DELAY_MS  = 800;       // delay between each batchRead batch
-const RPC_TIMEOUT_MS  = 30_000;    // per-request RPC timeout (ms)
-const DB_TIMEOUT_MS   = 30_000;    // per-request Supabase timeout (ms)
-const ADDR_CHUNK      = 100;       // addresses per Supabase .in() query
-const DB_RETRIES      = 3;         // max retries for Supabase calls
+const MAX_LOG_RANGE   = 5000n;      // 5000 blocks per chunk (was 500)
+const RPC_BATCH_SIZE  = 2;          // 2 parallel calls (safe for Lava)
+const DB_BATCH_SIZE   = 100;
+const LOG_BATCH_SIZE  = 500;
+const RPC_RETRIES     = 4;
+const RPC_DELAY_MS    = 100;        // shorter retry delay
+const CHUNK_DELAY_MS  = 100;        // 0.1 seconds between chunks
+const BATCH_DELAY_MS  = 200;        // 0.2 seconds between batchRead batches
+const RPC_TIMEOUT_MS  = 30_000;
+const DB_TIMEOUT_MS   = 30_000;
+const ADDR_CHUNK      = 100;
+const DB_RETRIES      = 3;
 
-// How far back to start on first run (7 days of BSC blocks @ ~3s/block)
-const LOOKBACK_BLOCKS = 201_600n;  // 7 days
+// How far back to start on first run 
+const LOOKBACK_BLOCKS = 201_600n;  
 
 // Score weights (integer math only — no floats anywhere)
 const W_TRADE  = 1_020n;
