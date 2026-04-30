@@ -44,6 +44,22 @@ export default async function handler(req, res) {
         }
 
         const cached = data.data;
+        
+        // ─────────────────────────────────────────────────────────────────────────
+        // FILTER OUT PROTOCOL WALLETS (replace addresses with actual ones, lowercase)
+        // ─────────────────────────────────────────────────────────────────────────
+        const PROTOCOL_ADDRESSES = new Set([
+            '0xeaEd594B5926A7D5FBBC61985390BaAf936a6b8d',   //  address holding > 250M ZLT
+            '0xAb168a06623eDe1b6b590733952cca4d7123f1F5',   //  address holding > 141M ZLT
+            '0xa40984640D83230EE6Fa1d912E2030f8485b9eFc',   //  address holding > 373 NFTs
+        ]);
+        const filteredLeaderboard = (cached.top100 || []).filter(
+            w => !PROTOCOL_ADDRESSES.has(w.address.toLowerCase())
+        );
+        cached.top100 = filteredLeaderboard;
+
+        // Optional: update totalWallets count if you want, but not required for display
+        // cached.totalWallets = filteredLeaderboard.length;
 
         // Set CDN cache headers so Vercel edge caches the response
         res.setHeader('Cache-Control', `public, s-maxage=${CACHE_MAX_AGE}, stale-while-revalidate=60`);
