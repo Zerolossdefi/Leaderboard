@@ -321,22 +321,22 @@ function zltWeiToUSD(w) { if(!zltPriceUSD) return null; return (Number(safeBigIn
 function zltToUSD(n) { if(!zltPriceUSD) return null; return n*zltPriceUSD; }
 
 // Normalize backend fields to frontend expectations
-function normalizeWallet(backendWallet) {
-  // lp_amount_zlt is in wei from backend -> convert to ZLT units
-  const lpZltWei = safeBigInt(backendWallet.lp_amount_zlt);
-  const lpZlt = Number(lpZltWei) / 1e18;
+function normalizeWallet(w) {
+  // Scores come from Postgres NUMERIC columns — they arrive as strings.
+  // Convert to Number for sort comparisons and Math.max() to work correctly.
   return {
-    address: backendWallet.address,
-    zpi: backendWallet.zpi_score,
-    tScore: backendWallet.t_score,
-    lScore: backendWallet.l_score,
-    hScore: backendWallet.h_score,
-    volume24h: backendWallet.volume_24h_wei,   // wei, as expected
-    swapsCount: backendWallet.swaps_count,
-    lpAmountZLT: lpZlt,                        // ZLT units
-    zltBalance: backendWallet.zlt_balance_wei, // wei, frontend divides later
-    nftCount: backendWallet.nft_count,
-    poeStaked: false
+    address:     w.address,
+    zpi:         Number(w.zpi_score   || 0),
+    tScore:      Number(w.t_score     || 0),
+    lScore:      Number(w.l_score     || 0),
+    hScore:      Number(w.h_score     || 0),
+    volume24h:   String(w.volume_24h_wei  || "0"),  // stays as wei string for safeBigInt
+    volume7d:    String(w.volume_7d_wei   || "0"),
+    swapsCount:  Number(w.swaps_count || 0),
+    lpAmountZLT: Number(safeBigInt(w.lp_amount_zlt)) / 1e18, // wei → ZLT
+    zltBalance:  String(w.zlt_balance_wei || "0"),  // stays as wei string for safeBigInt
+    nftCount:    Number(w.nft_count   || 0),
+    poeStaked:   false,
   };
 }
 
