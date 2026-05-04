@@ -441,7 +441,6 @@ async function loadData({ silent=false }={}) {
     document.getElementById("statNFTs").textContent = fmtShort(data.nftStaked || 0);
     const lpZLT = Number(safeBigInt(data.zltInLP)) / 1e18;
     document.getElementById("statLP").textContent = fmtZLT(lpZLT);
-    document.getElementById("statTxns").textContent = fmtShort(data.totalTxns || 0);
     
     switchTab(currentTab);
     dot.className="zl-dot live";
