@@ -1,8 +1,0 @@
-{
-  "functions": {
-    "api/score.js": {
-      "maxDuration": 60,
-      "runtime": "nodejs20.x"
-    }
-  }
-}
