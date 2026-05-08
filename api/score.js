@@ -60,7 +60,6 @@ async function scoreBNB(token, wallet) {
     }),
   });
 
-  // Fetch decimals with fallback to 18
   let decimals = 18;
   try {
     decimals = await client.readContract({
@@ -70,7 +69,6 @@ async function scoreBNB(token, wallet) {
     });
     decimals = Number(decimals);
   } catch {
-    // Non-standard token or RPC hiccup — use fallback
     decimals = 18;
   }
 
@@ -81,7 +79,6 @@ async function scoreBNB(token, wallet) {
     args: [wallet],
   });
 
-  // Convert from wei to human-readable float
   const balance = Number(rawBalance) / 10 ** decimals;
   const score   = Math.floor(balance * 100);
 
@@ -89,12 +86,11 @@ async function scoreBNB(token, wallet) {
 }
 
 // ---------------------------------------------------------------------------
-// TON handler  (dynamically imported to keep cold-start light)
+// TON handler (dynamically imported)
 // ---------------------------------------------------------------------------
 
 async function scoreTON(token, wallet) {
-  // Dynamic import — only loaded when a TON request actually arrives
-  const { TonClient, Address, Cell, beginCell } = await import('@ton/ton');
+  const { TonClient, Address, beginCell } = await import('@ton/ton');
 
   const client = new TonClient({
     endpoint: 'https://toncenter.com/api/v2/jsonRPC',
@@ -103,8 +99,6 @@ async function scoreTON(token, wallet) {
   const masterAddress  = Address.parse(token);
   const ownerAddress   = Address.parse(wallet);
 
-  // Step 1: call get_wallet_address on the Jetton master contract
-  // Stack argument: owner address as a cell slice
   const ownerCell = beginCell().storeAddress(ownerAddress).endCell();
 
   const { stack: walletStack } = await client.runMethod(
@@ -115,17 +109,14 @@ async function scoreTON(token, wallet) {
 
   const jettonWalletAddress = walletStack.readAddress();
 
-  // Step 2: call get_wallet_data on the returned Jetton wallet
   const { stack: dataStack } = await client.runMethod(
     jettonWalletAddress,
     'get_wallet_data',
     [],
   );
 
-  // get_wallet_data returns: balance, owner, master, wallet_code
   const rawBalance = dataStack.readBigNumber();
-
-  const DECIMALS = 9; // standard for TON Jettons
+  const DECIMALS = 9;
   const balance  = Number(rawBalance) / 10 ** DECIMALS;
   const score    = Math.floor(balance * 100);
 
@@ -137,7 +128,6 @@ async function scoreTON(token, wallet) {
 // ---------------------------------------------------------------------------
 
 export default async function handler(req) {
-  // Handle CORS preflight
   if (req.method === 'OPTIONS') {
     return new Response(null, { status: 204, headers: CORS_HEADERS });
   }
@@ -146,11 +136,15 @@ export default async function handler(req) {
     return corsResponse({ success: false, error: 'Method not allowed' }, 405);
   }
 
-  const { searchParams } = new URL(req.url);
+  // Build absolute URL from relative path
+  const protocol = req.headers['x-forwarded-proto'] || 'https';
+  const host = req.headers.host;
+  const fullUrl = `${protocol}://${host}${req.url}`;
+  const { searchParams } = new URL(fullUrl);
+
   const token  = searchParams.get('token')?.trim();
   const wallet = searchParams.get('wallet')?.trim();
 
-  // Validate required params
   if (!token || !wallet) {
     return corsResponse(
       { success: false, error: 'Missing required query parameters: token, wallet' },
@@ -158,20 +152,14 @@ export default async function handler(req) {
     );
   }
 
-  // Detect chain
   const chain = detectChain(wallet);
   if (!chain) {
     return corsResponse(
-      {
-        success: false,
-        error:
-          'Unrecognised wallet format. Expected 0x… (BNB Chain) or EQ/UQ/kQ… (TON).',
-      },
+      { success: false, error: 'Unrecognised wallet format. Expected 0x… (BNB Chain) or EQ/UQ/kQ… (TON).' },
       400,
     );
   }
 
-  // Additional BNB token address validation
   if (chain === 'bnb' && !BNB_RE.test(token)) {
     return corsResponse(
       { success: false, error: 'BNB Chain token address must be a valid 0x… EVM address.' },
@@ -188,13 +176,7 @@ export default async function handler(req) {
   } catch (err) {
     console.error('[score.js] Error:', err);
     return corsResponse(
-      {
-        success: false,
-        chain,
-        token,
-        wallet,
-        error: err?.message ?? 'Unexpected error',
-      },
+      { success: false, chain, token, wallet, error: err?.message ?? 'Unexpected error' },
       500,
     );
   }
