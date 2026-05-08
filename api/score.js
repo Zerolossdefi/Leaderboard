@@ -199,8 +199,3 @@ export default async function handler(req) {
     );
   }
 }
-
-// Vercel Edge / Serverless config
-export const config = {
-  runtime: 'nodejs18.x',
-};
