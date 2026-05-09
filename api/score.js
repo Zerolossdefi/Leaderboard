@@ -38,7 +38,7 @@ export default async function handler(req, res) {
     const balance = Number(balanceRaw) / 10 ** decimals;
 
     // 3. Simple score = balance * 100 (scaled for readability)
-    const score = Math.floor(balance * 100);
+    const score = Math.floor(balance * 0.01);
 
     res.status(200).json({
       success: true,
