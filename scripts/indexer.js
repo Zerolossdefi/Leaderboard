@@ -42,7 +42,7 @@ const W_LP     = 2_030n;
 const W_NFT    = 10_000n;
 const W_BAL    = 3_050n;
 const H_CAP    = 6_000_000n;
-const ACTIVITY_THRESHOLD_USD = 7n;
+const ACTIVITY_THRESHOLD_USD = 2n;
 
 // =============================================================================
 // ENV VALIDATION
