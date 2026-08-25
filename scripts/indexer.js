@@ -20,14 +20,14 @@ const STAKING_CONTRACT = '0xa40984640D83230EE6Fa1d912E2030f8485b9eFc'; // Stakin
 const SCALE        = 10n ** 12n;   // price precision scaler
 const WEI          = 10n ** 18n;   // 1 ether in wei
 
-const MAX_LOG_RANGE   = 2000n;      // 2000 blocks per chunk (was 500)
+const MAX_LOG_RANGE   = 5000n;      // [fix] 5000 blocks per chunk — fewer total requests (was 2000)
 const RPC_BATCH_SIZE  = 2;          // 2 parallel calls (safe for Lava)
 const DB_BATCH_SIZE   = 100;
 const LOG_BATCH_SIZE  = 500;
-const RPC_RETRIES     = 4;
-const RPC_DELAY_MS    = 100;        // shorter retry delay
-const CHUNK_DELAY_MS  = 100;        // 0.1 seconds between chunks
-const BATCH_DELAY_MS  = 200;        // 0.2 seconds between batchRead batches
+const RPC_RETRIES     = 5;          // [fix] 5 retries (was 4) — more headroom on flaky RPC
+const RPC_DELAY_MS    = 300;        // [fix] 300ms base retry delay with exponential backoff (was 100)
+const CHUNK_DELAY_MS  = 500;        // [fix] 500ms between chunks — prevents rate-limit storms (was 100)
+const BATCH_DELAY_MS  = 300;        // [fix] 300ms between batchRead batches (was 200)
 const RPC_TIMEOUT_MS  = 30_000;
 const DB_TIMEOUT_MS   = 30_000;
 const ADDR_CHUNK      = 100;
@@ -134,7 +134,11 @@ async function withRetry(fn, label = 'rpc') {
         } catch (err) {
             const isLast = attempt === RPC_RETRIES - 1;
             if (isLast) throw err;
-            const delay = RPC_DELAY_MS * 2 ** attempt;
+            // [fix] If rate-limited (429) back off longer before retrying —
+            // hammering a rate-limited endpoint immediately just burns more quota.
+            const isRateLimit = err.message?.includes('429') || err.message?.includes('limit exceeded');
+            const base  = isRateLimit ? RPC_DELAY_MS * 5 : RPC_DELAY_MS;
+            const delay = base * 2 ** attempt;
             console.warn(`[retry] ${label} failed (attempt ${attempt + 1}/${RPC_RETRIES}), retrying in ${delay}ms — ${err.message}`);
             await sleep(delay);
         }
@@ -295,7 +299,12 @@ async function getLogsChunked(fromBlock, toBlock) {
         }
 
         start = end + 1n;
-        if (start <= toBlock) await sleep(CHUNK_DELAY_MS);
+        if (start <= toBlock) {
+            // [fix] Every 20 chunks take a longer 3s pause so RPC endpoints can
+            // recover their rate-limit window before the next burst of requests.
+            const pause = chunk % 20 === 0 ? 3000 : CHUNK_DELAY_MS;
+            await sleep(pause);
+        }
     }
 
     console.log(`[logs] Done — ${allLogs.length} Transfer events in ${chunk} chunks`);
