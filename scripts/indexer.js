@@ -240,7 +240,9 @@ async function fetchNFTOwners(contractAddress) {
     let page       = 0;
 
     do {
-        const qs  = `chain=bsc&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
+        // Moralis cursors are already URL-safe — do NOT encode them.
+        // encodeURIComponent() corrupts '+' → '%2B', '=' → '%3D', causing HTTP 400 on page 2+.
+        const qs  = `chain=bsc&limit=100${cursor ? `&cursor=${cursor}` : ''}`;
         const data = await moralisFetch(`/nft/${contractAddress}/owners?${qs}`);
         if (!data?.result?.length) break;
 
@@ -391,7 +393,20 @@ async function run() {
     // -------------------------------------------------------------------------
     // 2. Fetch NFT holders (Moralis, paginated)
     // -------------------------------------------------------------------------
-    const nftOwners = await fetchNFTOwners(OAT_NFT);
+    // Fetch OAT NFT holders – if this fails (exhausted keys, rate limit, bad
+    // cursor, etc.) we continue with an empty map so the indexer does not crash.
+    // NFT counts will be zero for this run; fix Moralis keys and re-run to
+    // backfill. All downstream code already handles an empty Map correctly:
+    //   • nftOwners.keys() → nothing added to activeAddrs (fine)
+    //   • nftOwners.get(addr) → undefined → BigInt(0n) → no NFT bonus in scores
+    //   • nftOwners.size → 0 → nftStaked falls back to stakedNFTCount
+    let nftOwners = new Map();
+    try {
+        nftOwners = await fetchNFTOwners(OAT_NFT);
+    } catch (err) {
+        console.error('[moralis] Failed to fetch NFT owners:', err.message);
+        console.warn('[moralis] Continuing with zero NFT data. Update Moralis keys later.');
+    }
 
     // Fetch total staked NFT count from staking contract (separate from OAT holders)
     let stakedNFTCount = 0;
