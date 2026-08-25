@@ -246,7 +246,7 @@ async function fetchNFTOwners(contractAddress) {
     do {
         // Moralis cursors are already URL-safe — do NOT encode them.
         // encodeURIComponent() corrupts '+' → '%2B', '=' → '%3D', causing HTTP 400 on page 2+.
-        const qs  = `chain=bsc&limit=100${cursor ? `&cursor=${cursor}` : ''}`;
+        const qs = `chain=bsc&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
         const data = await moralisFetch(`/nft/${contractAddress}/owners?${qs}`);
         if (!data?.result?.length) break;
 
