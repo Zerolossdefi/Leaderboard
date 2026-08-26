@@ -69,9 +69,8 @@ if (!covalentKey) throw new Error('MORALIS_KEYS is empty after parsing');
 const RPC_URLS = [
     process.env.DRPC_URL.trim(),
     process.env.LAVA_URL.trim(),
-    'https://bsc-dataseed1.binance.org/',  // public fallback — no key required
+    'https://bsc-mainnet.nodereal.io/v1/0388c75bf54c4df4a2a5a68236187f37',  // public fallback — no key required
     'https://bsc-dataseed2.binance.org/',  // public fallback #2
-    'https://bsc-mainnet.nodereal.io/v1/64b851f6b8654d4aa213f82d734e5f0a', // public fallback #3
 ];
 
 // =============================================================================
