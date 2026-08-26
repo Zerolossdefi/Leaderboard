@@ -1,6 +1,6 @@
 // =============================================================================
 // ZPI Indexer – scripts/indexer.js
-// $0 infrastructure: dRPC + Lava Network RPC + Moralis NFT + Supabase
+// $0 infrastructure: dRPC + Lava Network RPC + Covalent NFT + Supabase
 // =============================================================================
 
 import { createClient }                        from '@supabase/supabase-js';
@@ -14,7 +14,7 @@ import 'dotenv/config';
 const ZLT          = '0x05D8762946fA7620b263E1e77003927addf5f7E6';
 const LP_ZLT_USDT  = '0x9aa4073cc0e86508ce18788cdf0e6b6b46677b8d';
 const LP_ZLT_BNB   = '0xab168a06623ede1b6b590733952cca4d7123f1f5';
-const OAT_NFT      = '0x1d1C02F9fcff7EE2073a72181caE53563C82879C'; // OAT NFT — Moralis holders fetch
+const OAT_NFT      = '0x1d1C02F9fcff7EE2073a72181caE53563C82879C'; // OAT NFT — Covalent holders fetch
 const STAKING_CONTRACT = '0xa40984640D83230EE6Fa1d912E2030f8485b9eFc'; // Staking contract — totalStaked()
 
 const SCALE        = 10n ** 12n;   // price precision scaler
@@ -24,11 +24,11 @@ const MAX_LOG_RANGE   = 5000n;      // [fix] 5000 blocks per chunk — fewer tot
 const RPC_BATCH_SIZE  = 2;          // 2 parallel calls (safe for Lava)
 const DB_BATCH_SIZE   = 100;
 const LOG_BATCH_SIZE  = 500;
-const RPC_RETRIES     = 5;          // [fix] 5 retries (was 4) — more headroom on flaky RPC
-const RPC_DELAY_MS    = 300;        // [fix] 300ms base retry delay with exponential backoff (was 100)
-const CHUNK_DELAY_MS  = 500;        // [fix] 500ms between chunks — prevents rate-limit storms (was 100)
-const BATCH_DELAY_MS  = 300;        // [fix] 300ms between batchRead batches (was 200)
-const RPC_TIMEOUT_MS  = 30_000;
+const RPC_RETRIES     = 7;          // [fix] 7 retries (was 5) — more headroom on flaky RPC
+const RPC_DELAY_MS    = 1500;       // [fix] 1500ms base retry delay with exponential backoff (was 300)
+const CHUNK_DELAY_MS  = 2000;       // [fix] 2000ms between chunks — avoids 429s on free-tier RPC (was 500)
+const BATCH_DELAY_MS  = 1500;       // [fix] 1500ms between batchRead batches (was 300)
+const RPC_TIMEOUT_MS  = 60_000;     // [fix] 60s timeout (was 30s) — headroom for slower fallback endpoints
 const DB_TIMEOUT_MS   = 30_000;
 const ADDR_CHUNK      = 100;
 const DB_RETRIES      = 3;
@@ -50,7 +50,7 @@ const ACTIVITY_THRESHOLD_USD = 2n;
 const REQUIRED_ENVS = [
     'SUPABASE_URL',
     'SUPABASE_SERVICE_ROLE_KEY',
-    'MORALIS_KEYS',
+    'MORALIS_KEYS', // [note] env var name kept for compatibility — now holds a Covalent API key
     'DRPC_URL',
     'LAVA_URL',
 ];
@@ -60,8 +60,10 @@ for (const key of REQUIRED_ENVS) {
     }
 }
 
-const moralisKeys = process.env.MORALIS_KEYS.split(',').map(k => k.trim()).filter(Boolean);
-if (moralisKeys.length === 0) throw new Error('MORALIS_KEYS is empty after parsing');
+// [change] MORALIS_KEYS now stores a Covalent API key (still comma-separated for
+// compatibility with the old multi-key format) — we only use the first entry.
+const covalentKey = process.env.MORALIS_KEYS.split(',')[0].trim();
+if (!covalentKey) throw new Error('MORALIS_KEYS is empty after parsing');
 
 // RPC endpoints — dRPC primary, Lava Network secondary, public BSC fallback
 const RPC_URLS = [
@@ -69,6 +71,7 @@ const RPC_URLS = [
     process.env.LAVA_URL.trim(),
     'https://bsc-dataseed1.binance.org/',  // public fallback — no key required
     'https://bsc-dataseed2.binance.org/',  // public fallback #2
+    'https://bsc-mainnet.nodereal.io/v1/64b851f6b8654d4aa213f82d734e5f0a', // public fallback #3
 ];
 
 // =============================================================================
@@ -218,53 +221,52 @@ async function batchRead(contract, abi, functionName, argsList) {
 }
 
 // =============================================================================
-// MORALIS – NFT OWNER FETCH (PAGINATED)
+// COVALENT – NFT OWNER FETCH (PAGINATED)
+// [change] Replaced Moralis with Covalent's token_holders endpoint. Covalent
+// returns one row per holder with an aggregate balance already, so there's no
+// per-NFT accumulation needed — just sum `balance` per address across pages.
 // =============================================================================
 
-async function moralisFetch(path) {
-    for (const key of moralisKeys) {
-        try {
-            const res = await fetch(`https://deep-index.moralis.io/api/v2.2${path}`, {
-                headers: { 'X-API-Key': key },
-            });
-            if (res.status === 200) return await res.json();
-            if (res.status === 401) { console.warn('[moralis] 401 on key, rotating...'); continue; }
-            throw new Error(`Moralis HTTP ${res.status}`);
-        } catch (err) {
-            console.warn(`[moralis] key failed: ${err.message}, rotating...`);
-        }
-    }
-    throw new Error('All Moralis keys exhausted');
-}
-
 async function fetchNFTOwners(contractAddress) {
-    console.log('[moralis] Fetching NFT owners (all pages)...');
+    console.log('[covalent] Fetching NFT owners (all pages)...');
     const ownerMap = new Map();
-    let cursor     = null;
-    let page       = 0;
+    let pageNumber = 0;
+    let hasMore    = true;
 
-    do {
-        // Moralis cursors are already URL-safe — do NOT encode them.
-        // encodeURIComponent() corrupts '+' → '%2B', '=' → '%3D', causing HTTP 400 on page 2+.
-        const qs = `chain=bsc&limit=100${cursor ? `&cursor=${encodeURIComponent(cursor)}` : ''}`;
-        const data = await moralisFetch(`/nft/${contractAddress}/owners?${qs}`);
-        if (!data?.result?.length) break;
+    try {
+        while (hasMore) {
+            const url =
+                `https://api.covalenthq.com/v1/56/tokens/${contractAddress}/token_holders/` +
+                `?key=${encodeURIComponent(covalentKey)}&page-size=100&page-number=${pageNumber}`;
 
-        for (const nft of data.result) {
-            const owner = nft.owner_of.toLowerCase();
-            ownerMap.set(owner, (ownerMap.get(owner) || 0) + 1);
+            const res = await fetch(url);
+            if (!res.ok) throw new Error(`Covalent HTTP ${res.status}`);
+
+            const data = await res.json();
+            const items = data?.items ?? [];
+
+            for (const item of items) {
+                const owner   = item.address.toLowerCase();
+                const balance = Number(item.balance) || 0;
+                ownerMap.set(owner, (ownerMap.get(owner) || 0) + balance);
+            }
+
+            hasMore = data?.pagination?.has_more ?? false;
+            console.log(`[covalent] Page ${pageNumber}: ${items.length} holders, has_more: ${hasMore}`);
+            pageNumber++;
         }
 
-        cursor = data.cursor ?? null;
-        page++;
-        console.log(`[moralis] Page ${page}: ${data.result.length} NFTs, cursor: ${cursor ? 'yes' : 'end'}`);
-    } while (cursor);
-
-    console.log(`[moralis] Total: ${ownerMap.size} unique holders across ${page} pages`);
-    if (ownerMap.size === 0) {
-        console.error('[moralis] ❌ ZERO NFT holders found. Check contract address or Moralis keys.');
+        console.log(`[covalent] Total: ${ownerMap.size} unique holders across ${pageNumber} page(s)`);
+        if (ownerMap.size === 0) {
+            console.error('[covalent] ❌ ZERO NFT holders found. Check contract address or Covalent key.');
+        }
+        return ownerMap;
+    } catch (err) {
+        // [change] Fail-soft: log and return an empty Map so the indexer keeps
+        // running with zero NFT data rather than crashing the whole run.
+        console.error('[covalent] NFT holder fetch failed:', err.message);
+        return new Map();
     }
-    return ownerMap;
 }
 
 // =============================================================================
@@ -364,7 +366,7 @@ async function run() {
     console.log('⚡ ZPI Indexer starting...');
     console.log(`   dRPC URL : ${process.env.DRPC_URL}`);
     console.log(`   Lava URL : ${process.env.LAVA_URL}`);
-    console.log(`   Moralis  : ${moralisKeys.length} key(s)`);
+    console.log(`   Covalent : key loaded`);
 
     // -------------------------------------------------------------------------
     // 1. Resolve current block + fromBlock
@@ -400,21 +402,24 @@ async function run() {
     }
 
     // -------------------------------------------------------------------------
-    // 2. Fetch NFT holders (Moralis, paginated)
+    // 2. Fetch NFT holders (Covalent, paginated)
     // -------------------------------------------------------------------------
-    // Fetch OAT NFT holders – if this fails (exhausted keys, rate limit, bad
-    // cursor, etc.) we continue with an empty map so the indexer does not crash.
-    // NFT counts will be zero for this run; fix Moralis keys and re-run to
+    // Fetch OAT NFT holders – if this fails (bad key, rate limit, network
+    // error, etc.) we continue with an empty map so the indexer does not crash.
+    // NFT counts will be zero for this run; fix the Covalent key and re-run to
     // backfill. All downstream code already handles an empty Map correctly:
     //   • nftOwners.keys() → nothing added to activeAddrs (fine)
     //   • nftOwners.get(addr) → undefined → BigInt(0n) → no NFT bonus in scores
     //   • nftOwners.size → 0 → nftStaked falls back to stakedNFTCount
+    // Note: fetchNFTOwners already catches its own errors internally and
+    // returns an empty Map on failure, but we keep this try/catch as a guard
+    // in case of an unexpected throw.
     let nftOwners = new Map();
     try {
         nftOwners = await fetchNFTOwners(OAT_NFT);
     } catch (err) {
-        console.error('[moralis] Failed to fetch NFT owners:', err.message);
-        console.warn('[moralis] Continuing with zero NFT data. Update Moralis keys later.');
+        console.error('[covalent] Failed to fetch NFT owners:', err.message);
+        console.warn('[covalent] Continuing with zero NFT data. Update Covalent key later.');
     }
 
     // Fetch total staked NFT count from staking contract (separate from OAT holders)
